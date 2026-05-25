@@ -1,12 +1,44 @@
-# Pessimistic Velodrome LP Oracle Foundry Port
+# Capped Velodrome Stable LP Oracle
 
-Foundry port of the Brownie-based `PessimisticVelodromeLPOracle` repo focused on:
+Foundry port and simplification of the Velodrome LP oracle focused on stable pools with two Chainlink USD feeds.
 
-- `PessimisticVeloSingleOracle.sol`
-- `PessimisticVeloStableLpPriceFeed.sol`
-- their required Solidity dependencies and mock-only Forge tests
+## Contracts
 
-The tests do not require an Optimism RPC URL. Velodrome pools, Chainlink feeds, swap failures, and the Optimism sequencer uptime feed are mocked in Solidity.
+- `src/PessimisticVeloSingleOracle.sol`: prices one Velodrome-style stable LP token from fair reserves.
+- `src/PessimisticVeloStableLpPriceFeed.sol`: Chainlink-like adapter around the single oracle.
+- `src/MockChainlinkFeed.sol`: test-only Chainlink feed mock.
+
+## Oracle Behavior
+
+`PessimisticVeloSingleOracle` is intentionally narrow:
+
+- only stable pools are supported;
+- the LP token must have 18 decimals;
+- both underlying tokens must have Chainlink feeds;
+- both Chainlink feeds must report 8-decimal USD prices;
+- each underlying token price is capped at `1e8` before LP pricing, so prices above $1 do not increase the reported LP value;
+- non-positive underlying feed answers produce an LP price of `0`;
+- pool reserves are read from `IVeloPool.metadata()` and normalized to 18 decimals;
+- fair-reserve LP pricing uses the Velodrome stable invariant `x^3 * y + y^3 * x = k`.
+
+The heartbeat values are stored and exposed, but this contract does not enforce staleness internally. Consumers should check `chainlinkPriceLastUpdated()` or use their own staleness policy.
+
+## Price Feed Adapter
+
+`PessimisticVeloStableLpPriceFeed` exposes `latestRoundData()` with 8 decimals. It forwards the oracle price and the older update timestamp from the two underlying feeds.
+
+If the source price is larger than `type(int256).max`, the adapter returns an answer of `0` rather than reverting.
+
+## Tests
+
+The Forge tests are fully mocked and do not require an Optimism RPC URL. Coverage includes:
+
+- constructor validation for stable pools, LP decimals, feed presence, and feed decimals;
+- token price capping at $1;
+- zero, negative, stale, reverting, and overflow feed behavior;
+- Chainlink-like adapter output;
+- fair-reserve pricing at parity;
+- reserve-edge stress tests, including invariant-preserving extreme pool skew and pathological one-sided reserve states.
 
 ## Build
 

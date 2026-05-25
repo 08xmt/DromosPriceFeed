@@ -2,19 +2,16 @@
 pragma solidity ^0.8.20;
 
 import {IChainLinkOracle} from "./interfaces/IChainLinkOracle.sol";
-import {IVeloPool} from "./interfaces/IVeloPool.sol";
 
 interface IPessimisticVeloSingleOracle {
     function pool() external view returns (address);
 
-    function getCurrentPoolPrice(
-        bool _usePessimisticPricing
-    ) external view returns (uint256);
+    function getCurrentPoolPriceData() external view returns (uint256 price, uint256 updatedAt);
 }
 
 /**
- * @title Pessimistic Velodrome Stable LP Price Feed
- * @notice Minimal Chainlink-like price feed adapter for a single Velodrome stable LP pessimistic oracle.
+ * @title Capped Velodrome Stable LP Price Feed
+ * @notice Minimal Chainlink-like price feed adapter for a single Velodrome stable LP oracle.
  */
 contract PessimisticVeloStableLpPriceFeed is IChainLinkOracle {
     IPessimisticVeloSingleOracle public immutable source;
@@ -22,12 +19,7 @@ contract PessimisticVeloStableLpPriceFeed is IChainLinkOracle {
 
     constructor(address _source) {
         source = IPessimisticVeloSingleOracle(_source);
-
-        address _pool = IPessimisticVeloSingleOracle(_source).pool();
-        if (!IVeloPool(_pool).stable()) {
-            revert("Pool must be stable");
-        }
-        pool = _pool;
+        pool = IPessimisticVeloSingleOracle(_source).pool();
     }
 
     function decimals() external pure returns (uint8) {
@@ -37,22 +29,15 @@ contract PessimisticVeloStableLpPriceFeed is IChainLinkOracle {
     function latestRoundData()
         external
         view
-        returns (
-            uint80 roundId,
-            int256 answer,
-            uint256 startedAt,
-            uint256 updatedAt,
-            uint80 answeredInRound
-        )
+        returns (uint80 roundId, int256 answer, uint256 startedAt, uint256 updatedAt, uint80 answeredInRound)
     {
-        uint256 price = source.getCurrentPoolPrice(true);
-        if (price == 0) {
-            revert("Invalid price");
-        }
-        if (price > uint256(type(int256).max)) {
-            revert("Price overflow");
+        uint256 price;
+        (price, updatedAt) = source.getCurrentPoolPriceData();
+        if (price <= uint256(type(int256).max)) {
+            // forge-lint: disable-next-line(unsafe-typecast)
+            answer = int256(price);
         }
 
-        return (0, int256(price), block.timestamp, block.timestamp, 0);
+        return (0, answer, updatedAt, updatedAt, 0);
     }
 }
