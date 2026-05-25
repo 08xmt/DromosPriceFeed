@@ -3,8 +3,8 @@ pragma solidity ^0.8.20;
 
 import {Test} from "forge-std/Test.sol";
 import {MockChainlinkFeed} from "../src/MockChainlinkFeed.sol";
-import {PessimisticVeloSingleOracle} from "../src/PessimisticVeloSingleOracle.sol";
-import {PessimisticVeloStableLpPriceFeed} from "../src/PessimisticVeloStableLpPriceFeed.sol";
+import {CappedVeloStableSwapOracle} from "../src/CappedVeloStableSwapOracle.sol";
+import {CappedVeloStableSwapPriceFeed} from "../src/CappedVeloStableSwapPriceFeed.sol";
 import {IChainLinkOracle} from "../src/interfaces/IChainLinkOracle.sol";
 
 contract MockToken {
@@ -133,7 +133,7 @@ contract StaticSingleOracleSource {
     }
 }
 
-contract PessimisticVeloOracleTest is Test {
+contract CappedVeloStableSwapOracleTest is Test {
     address internal constant SEQUENCER_UPTIME_FEED = 0x371EAD81c9102C9BF4874A9075FFFf170F2Ee389;
     uint96 internal constant HEARTBEAT = 10 days;
     uint256 internal constant WAD = 1e18;
@@ -174,10 +174,10 @@ contract PessimisticVeloOracleTest is Test {
     }
 
     function testStableLpPriceFeedAdapter() public {
-        (, MockChainlinkFeed feed0, MockChainlinkFeed feed1, PessimisticVeloSingleOracle source) =
+        (, MockChainlinkFeed feed0, MockChainlinkFeed feed1, CappedVeloStableSwapOracle source) =
             _deployTwoFeedSource();
 
-        PessimisticVeloStableLpPriceFeed adapter = new PessimisticVeloStableLpPriceFeed(address(source));
+        CappedVeloStableSwapPriceFeed adapter = new CappedVeloStableSwapPriceFeed(address(source));
 
         (uint80 roundId, int256 answer, uint256 startedAt, uint256 updatedAt, uint80 answeredInRound) =
             adapter.latestRoundData();
@@ -195,7 +195,7 @@ contract PessimisticVeloOracleTest is Test {
     function testStableLpPriceFeedAdapterPassesThroughZeroAndOverflowAnswers() public {
         MockVeloPool pool = _newPool();
         StaticSingleOracleSource source = new StaticSingleOracleSource(address(pool), 0);
-        PessimisticVeloStableLpPriceFeed adapter = new PessimisticVeloStableLpPriceFeed(address(source));
+        CappedVeloStableSwapPriceFeed adapter = new CappedVeloStableSwapPriceFeed(address(source));
 
         (, int256 zeroAnswer,, uint256 zeroUpdatedAt,) = adapter.latestRoundData();
         assertEq(zeroAnswer, 0);
@@ -209,7 +209,7 @@ contract PessimisticVeloOracleTest is Test {
     }
 
     function testTokenPricesAreCappedAtOneUsd() public {
-        (, MockChainlinkFeed feed0, MockChainlinkFeed feed1, PessimisticVeloSingleOracle source) =
+        (, MockChainlinkFeed feed0, MockChainlinkFeed feed1, CappedVeloStableSwapOracle source) =
             _deployTwoFeedSource();
 
         _set(feed0, feed1, 110_000_000, 120_000_000);
@@ -221,7 +221,7 @@ contract PessimisticVeloOracleTest is Test {
     }
 
     function testTokenPriceCapPreservesBelowOneUsdPrices() public {
-        (, MockChainlinkFeed feed0, MockChainlinkFeed feed1, PessimisticVeloSingleOracle source) =
+        (, MockChainlinkFeed feed0, MockChainlinkFeed feed1, CappedVeloStableSwapOracle source) =
             _deployTwoFeedSource();
 
         _set(feed0, feed1, 110_000_000, 95_000_000);
@@ -233,9 +233,9 @@ contract PessimisticVeloOracleTest is Test {
     }
 
     function testScenarioGridReturnsRows() public {
-        (, MockChainlinkFeed feed0, MockChainlinkFeed feed1, PessimisticVeloSingleOracle source) =
+        (, MockChainlinkFeed feed0, MockChainlinkFeed feed1, CappedVeloStableSwapOracle source) =
             _deployTwoFeedSource();
-        PessimisticVeloStableLpPriceFeed adapter = new PessimisticVeloStableLpPriceFeed(address(source));
+        CappedVeloStableSwapPriceFeed adapter = new CappedVeloStableSwapPriceFeed(address(source));
 
         uint256[2] memory price0Answers = [ONE_USD, uint256(99_000_000)];
         uint256[2] memory price1Answers = [ONE_USD, uint256(101_000_000)];
@@ -285,8 +285,8 @@ contract PessimisticVeloOracleTest is Test {
         MockVeloPool pool = _newPool();
         FlexibleChainlinkFeed feed0 = new FlexibleChainlinkFeed(8, int256(ONE_USD));
         MockChainlinkFeed feed1 = new MockChainlinkFeed(int256(ONE_USD));
-        PessimisticVeloSingleOracle source = _deploySource(pool, address(feed0), address(feed1));
-        PessimisticVeloStableLpPriceFeed adapter = new PessimisticVeloStableLpPriceFeed(address(source));
+        CappedVeloStableSwapOracle source = _deploySource(pool, address(feed0), address(feed1));
+        CappedVeloStableSwapPriceFeed adapter = new CappedVeloStableSwapPriceFeed(address(source));
         uint256 staleUpdatedAt = feed0.updatedAt();
 
         vm.warp(block.timestamp + HEARTBEAT + 1);
@@ -310,8 +310,8 @@ contract PessimisticVeloOracleTest is Test {
         MockVeloPool pool = _newPool();
         RevertingChainlinkFeed feed0 = new RevertingChainlinkFeed();
         MockChainlinkFeed feed1 = new MockChainlinkFeed(int256(ONE_USD));
-        PessimisticVeloSingleOracle source = _deploySource(pool, address(feed0), address(feed1));
-        PessimisticVeloStableLpPriceFeed adapter = new PessimisticVeloStableLpPriceFeed(address(source));
+        CappedVeloStableSwapOracle source = _deploySource(pool, address(feed0), address(feed1));
+        CappedVeloStableSwapPriceFeed adapter = new CappedVeloStableSwapPriceFeed(address(source));
 
         vm.expectRevert(bytes("feed unavailable"));
         source.getChainlinkPrice(0);
@@ -327,13 +327,13 @@ contract PessimisticVeloOracleTest is Test {
     }
 
     function testFairReservePricingAtParity() public {
-        (,,, PessimisticVeloSingleOracle source) = _deployTwoFeedSource();
+        (,,, CappedVeloStableSwapOracle source) = _deployTwoFeedSource();
 
         assertApproxEqAbs(source.getCurrentPoolPrice(), 2 * ONE_USD, 10);
     }
 
     function testFairReservePricingStableAcrossInvariantPreservingReserveEdges() public {
-        (MockVeloPool pool,,, PessimisticVeloSingleOracle source) = _deployTwoFeedSource();
+        (MockVeloPool pool,,, CappedVeloStableSwapOracle source) = _deployTwoFeedSource();
         uint256 baselinePrice = source.getCurrentPoolPrice();
         uint256 targetK = _stableK(WAD, WAD);
         uint256[4] memory scarceReserves = [uint256(1), uint256(1e6), uint256(1e9), uint256(1e12)];
@@ -353,7 +353,7 @@ contract PessimisticVeloOracleTest is Test {
     }
 
     function testFairReservePricingDoesNotOverstateValueAtReserveBoundaries() public {
-        (MockVeloPool pool,,, PessimisticVeloSingleOracle source) = _deployTwoFeedSource();
+        (MockVeloPool pool,,, CappedVeloStableSwapOracle source) = _deployTwoFeedSource();
 
         _assertDoesNotOverstateReserveValue(pool, source, 0, WAD);
         _assertDoesNotOverstateReserveValue(pool, source, WAD, 0);
@@ -386,8 +386,8 @@ contract PessimisticVeloOracleTest is Test {
         MockChainlinkFeed(feed0).setAnswer(int256(answer0));
         MockChainlinkFeed(feed1).setAnswer(int256(answer1));
 
-        freshPrice = PessimisticVeloSingleOracle(source).getCurrentPoolPrice();
-        adapterPrice = _adapterAnswer(PessimisticVeloStableLpPriceFeed(adapter));
+        freshPrice = CappedVeloStableSwapOracle(source).getCurrentPoolPrice();
+        adapterPrice = _adapterAnswer(CappedVeloStableSwapPriceFeed(adapter));
     }
 
     function _runScenario(
@@ -415,7 +415,7 @@ contract PessimisticVeloOracleTest is Test {
             MockVeloPool pool,
             MockChainlinkFeed feed0,
             MockChainlinkFeed feed1,
-            PessimisticVeloSingleOracle source
+            CappedVeloStableSwapOracle source
         )
     {
         pool = _newPool();
@@ -426,9 +426,9 @@ contract PessimisticVeloOracleTest is Test {
 
     function _deploySource(MockVeloPool pool, address feed0, address feed1)
         internal
-        returns (PessimisticVeloSingleOracle source)
+        returns (CappedVeloStableSwapOracle source)
     {
-        source = new PessimisticVeloSingleOracle(address(pool), feed0, feed1, HEARTBEAT, HEARTBEAT, address(this));
+        source = new CappedVeloStableSwapOracle(address(pool), feed0, feed1, HEARTBEAT, HEARTBEAT, address(this));
     }
 
     function _newPool() internal returns (MockVeloPool pool) {
@@ -452,7 +452,7 @@ contract PessimisticVeloOracleTest is Test {
 
     function _assertDoesNotOverstateReserveValue(
         MockVeloPool pool,
-        PessimisticVeloSingleOracle source,
+        CappedVeloStableSwapOracle source,
         uint256 reserve0,
         uint256 reserve1
     ) internal {
@@ -493,7 +493,7 @@ contract PessimisticVeloOracleTest is Test {
         return (a * b) / WAD;
     }
 
-    function _adapterAnswer(PessimisticVeloStableLpPriceFeed adapter) internal view returns (uint256) {
+    function _adapterAnswer(CappedVeloStableSwapPriceFeed adapter) internal view returns (uint256) {
         (, int256 answer,,,) = adapter.latestRoundData();
         return uint256(answer);
     }

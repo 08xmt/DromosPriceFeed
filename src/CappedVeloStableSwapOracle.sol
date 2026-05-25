@@ -7,14 +7,14 @@ import {IChainLinkOracle} from "./interfaces/IChainLinkOracle.sol";
 import {FixedPointMathLib} from "./FixedPointMathLib.sol";
 
 /**
- * @title Velodrome LP Capped Single Oracle
+ * @title Capped Velodrome Stable Swap Oracle
  * @author Original author: Yearn Finance, Modified by: Inverse Finance
  * @notice This oracle may be used to price Velodrome-style stable LP pools using fair reserves.
  *  Both pool tokens must have Chainlink USD feeds. Each token price is capped at 1 USD before the LP price is
  *  calculated, so upward moves above peg do not increase the reported LP value.
  */
 
-contract PessimisticVeloSingleOracle is Ownable2Step {
+contract CappedVeloStableSwapOracle is Ownable2Step {
     /* ========== STATE VARIABLES ========== */
     /// @notice Address of the pool for this oracle.
     address public immutable pool;

@@ -1,16 +1,16 @@
-# Capped Velodrome Stable LP Oracle
+# Capped Velodrome Stable Swap Oracle
 
-Foundry port and simplification of the Velodrome LP oracle focused on stable pools with two Chainlink USD feeds.
+Foundry port and simplification of the Velodrome stable-swap LP oracle focused on capped USD pricing from two Chainlink feeds.
 
 ## Contracts
 
-- `src/PessimisticVeloSingleOracle.sol`: prices one Velodrome-style stable LP token from fair reserves.
-- `src/PessimisticVeloStableLpPriceFeed.sol`: Chainlink-like adapter around the single oracle.
+- `src/CappedVeloStableSwapOracle.sol`: prices one Velodrome-style stable LP token from fair reserves.
+- `src/CappedVeloStableSwapPriceFeed.sol`: Chainlink-like adapter around the single oracle.
 - `src/MockChainlinkFeed.sol`: test-only Chainlink feed mock.
 
 ## Oracle Behavior
 
-`PessimisticVeloSingleOracle` is intentionally narrow:
+`CappedVeloStableSwapOracle` is intentionally narrow:
 
 - only stable pools are supported;
 - the LP token must have 18 decimals;
@@ -25,7 +25,7 @@ The heartbeat values are stored and exposed, but this contract does not enforce 
 
 ## Price Feed Adapter
 
-`PessimisticVeloStableLpPriceFeed` exposes `latestRoundData()` with 8 decimals. It forwards the oracle price and the older update timestamp from the two underlying feeds.
+`CappedVeloStableSwapPriceFeed` exposes `latestRoundData()` with 8 decimals. It forwards the oracle price and the older update timestamp from the two underlying feeds.
 
 If the source price is larger than `type(int256).max`, the adapter returns an answer of `0` rather than reverting.
 

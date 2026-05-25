@@ -3,23 +3,23 @@ pragma solidity ^0.8.20;
 
 import {IChainLinkOracle} from "./interfaces/IChainLinkOracle.sol";
 
-interface IPessimisticVeloSingleOracle {
+interface ICappedVeloStableSwapOracle {
     function pool() external view returns (address);
 
     function getCurrentPoolPriceData() external view returns (uint256 price, uint256 updatedAt);
 }
 
 /**
- * @title Capped Velodrome Stable LP Price Feed
- * @notice Minimal Chainlink-like price feed adapter for a single Velodrome stable LP oracle.
+ * @title Capped Velodrome Stable Swap Price Feed
+ * @notice Minimal Chainlink-like price feed adapter for a single Velodrome stable-swap oracle.
  */
-contract PessimisticVeloStableLpPriceFeed is IChainLinkOracle {
-    IPessimisticVeloSingleOracle public immutable source;
+contract CappedVeloStableSwapPriceFeed is IChainLinkOracle {
+    ICappedVeloStableSwapOracle public immutable source;
     address public immutable pool;
 
     constructor(address _source) {
-        source = IPessimisticVeloSingleOracle(_source);
-        pool = IPessimisticVeloSingleOracle(_source).pool();
+        source = ICappedVeloStableSwapOracle(_source);
+        pool = ICappedVeloStableSwapOracle(_source).pool();
     }
 
     function decimals() external pure returns (uint8) {
