@@ -18,10 +18,11 @@ Foundry port and simplification of the Velodrome stable-swap LP oracle focused o
 - both Chainlink feeds must report 8-decimal USD prices;
 - each underlying token price is capped at `1e8` before LP pricing, so prices above $1 do not increase the reported LP value;
 - non-positive underlying feed answers produce an LP price of `0`;
+- zero LP token supply produces an LP price of `0`;
 - pool reserves are read from `IVeloPool.metadata()` and normalized to 18 decimals;
 - fair-reserve LP pricing uses the Velodrome stable invariant `x^3 * y + y^3 * x = k`.
 
-The heartbeat values are stored and exposed, but this contract does not enforce staleness internally. Consumers should check `chainlinkPriceLastUpdated()` or use their own staleness policy.
+Staleness and heartbeat checks are handled upstream. This contract forwards the older underlying feed timestamp via `getCurrentPoolPriceData()` and the price feed adapter.
 
 ## Price Feed Adapter
 
