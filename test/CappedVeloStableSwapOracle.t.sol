@@ -134,14 +134,11 @@ contract StaticSingleOracleSource {
 }
 
 contract CappedVeloStableSwapOracleTest is Test {
-    address internal constant SEQUENCER_UPTIME_FEED = 0x371EAD81c9102C9BF4874A9075FFFf170F2Ee389;
-    uint96 internal constant HEARTBEAT = 10 days;
     uint256 internal constant WAD = 1e18;
     uint256 internal constant ONE_USD = 100_000_000;
 
     function setUp() public {
         vm.warp(10 days);
-        _mockSequencerAnswer(0);
     }
 
     function testMockChainlinkFeedUpdates() public {
@@ -174,8 +171,7 @@ contract CappedVeloStableSwapOracleTest is Test {
     }
 
     function testStableLpPriceFeedAdapter() public {
-        (, MockChainlinkFeed feed0, MockChainlinkFeed feed1, CappedVeloStableSwapOracle source) =
-            _deployTwoFeedSource();
+        (, MockChainlinkFeed feed0, MockChainlinkFeed feed1, CappedVeloStableSwapOracle source) = _deployTwoFeedSource();
 
         CappedVeloStableSwapPriceFeed adapter = new CappedVeloStableSwapPriceFeed(address(source));
 
@@ -209,8 +205,7 @@ contract CappedVeloStableSwapOracleTest is Test {
     }
 
     function testTokenPricesAreCappedAtOneUsd() public {
-        (, MockChainlinkFeed feed0, MockChainlinkFeed feed1, CappedVeloStableSwapOracle source) =
-            _deployTwoFeedSource();
+        (, MockChainlinkFeed feed0, MockChainlinkFeed feed1, CappedVeloStableSwapOracle source) = _deployTwoFeedSource();
 
         _set(feed0, feed1, 110_000_000, 120_000_000);
 
@@ -221,8 +216,7 @@ contract CappedVeloStableSwapOracleTest is Test {
     }
 
     function testTokenPriceCapPreservesBelowOneUsdPrices() public {
-        (, MockChainlinkFeed feed0, MockChainlinkFeed feed1, CappedVeloStableSwapOracle source) =
-            _deployTwoFeedSource();
+        (, MockChainlinkFeed feed0, MockChainlinkFeed feed1, CappedVeloStableSwapOracle source) = _deployTwoFeedSource();
 
         _set(feed0, feed1, 110_000_000, 95_000_000);
 
@@ -233,8 +227,7 @@ contract CappedVeloStableSwapOracleTest is Test {
     }
 
     function testScenarioGridReturnsRows() public {
-        (, MockChainlinkFeed feed0, MockChainlinkFeed feed1, CappedVeloStableSwapOracle source) =
-            _deployTwoFeedSource();
+        (, MockChainlinkFeed feed0, MockChainlinkFeed feed1, CappedVeloStableSwapOracle source) = _deployTwoFeedSource();
         CappedVeloStableSwapPriceFeed adapter = new CappedVeloStableSwapPriceFeed(address(source));
 
         uint256[2] memory price0Answers = [ONE_USD, uint256(99_000_000)];
@@ -281,7 +274,7 @@ contract CappedVeloStableSwapOracleTest is Test {
         _deploySource(pool, address(badDecimalsFeed), address(feed));
     }
 
-    function testChainlinkPricePassesThroughStaleBadAndSequencerDownData() public {
+    function testChainlinkPricePassesThroughStaleAndBadData() public {
         MockVeloPool pool = _newPool();
         FlexibleChainlinkFeed feed0 = new FlexibleChainlinkFeed(8, int256(ONE_USD));
         MockChainlinkFeed feed1 = new MockChainlinkFeed(int256(ONE_USD));
@@ -289,7 +282,7 @@ contract CappedVeloStableSwapOracleTest is Test {
         CappedVeloStableSwapPriceFeed adapter = new CappedVeloStableSwapPriceFeed(address(source));
         uint256 staleUpdatedAt = feed0.updatedAt();
 
-        vm.warp(block.timestamp + HEARTBEAT + 1);
+        vm.warp(block.timestamp + 10 days + 1);
         assertEq(source.getChainlinkPrice(0), ONE_USD);
         (, int256 staleAnswer,, uint256 adapterUpdatedAt,) = adapter.latestRoundData();
         assertGt(staleAnswer, 0);
@@ -300,10 +293,16 @@ contract CappedVeloStableSwapOracleTest is Test {
         assertEq(source.getCurrentPoolPrice(), 0);
         (, int256 badAnswer,,,) = adapter.latestRoundData();
         assertEq(badAnswer, 0);
+    }
 
-        feed0.setAnswer(int256(ONE_USD));
-        _mockSequencerAnswer(1);
-        assertEq(source.getChainlinkPrice(0), ONE_USD);
+    function testChainlinkTokenIndexMustBeZeroOrOne() public {
+        (,,, CappedVeloStableSwapOracle source) = _deployTwoFeedSource();
+
+        vm.expectRevert(bytes("bad index"));
+        source.getChainlinkPrice(2);
+
+        vm.expectRevert(bytes("bad index"));
+        source.chainlinkPriceLastUpdated(2);
     }
 
     function testChainlinkPriceRevertsWhenFeedCallReverts() public {
@@ -330,6 +329,17 @@ contract CappedVeloStableSwapOracleTest is Test {
         (,,, CappedVeloStableSwapOracle source) = _deployTwoFeedSource();
 
         assertApproxEqAbs(source.getCurrentPoolPrice(), 2 * ONE_USD, 10);
+    }
+
+    function testFairReservePricingReturnsZeroWhenTotalSupplyIsZero() public {
+        (MockVeloPool pool,,, CappedVeloStableSwapOracle source) = _deployTwoFeedSource();
+        CappedVeloStableSwapPriceFeed adapter = new CappedVeloStableSwapPriceFeed(address(source));
+
+        pool.setState(0, WAD, WAD);
+
+        assertEq(source.getCurrentPoolPrice(), 0);
+        (, int256 answer,,,) = adapter.latestRoundData();
+        assertEq(answer, 0);
     }
 
     function testFairReservePricingStableAcrossInvariantPreservingReserveEdges() public {
@@ -411,12 +421,7 @@ contract CappedVeloStableSwapOracleTest is Test {
 
     function _deployTwoFeedSource()
         internal
-        returns (
-            MockVeloPool pool,
-            MockChainlinkFeed feed0,
-            MockChainlinkFeed feed1,
-            CappedVeloStableSwapOracle source
-        )
+        returns (MockVeloPool pool, MockChainlinkFeed feed0, MockChainlinkFeed feed1, CappedVeloStableSwapOracle source)
     {
         pool = _newPool();
         feed0 = new MockChainlinkFeed(int256(ONE_USD));
@@ -428,7 +433,7 @@ contract CappedVeloStableSwapOracleTest is Test {
         internal
         returns (CappedVeloStableSwapOracle source)
     {
-        source = new CappedVeloStableSwapOracle(address(pool), feed0, feed1, HEARTBEAT, HEARTBEAT, address(this));
+        source = new CappedVeloStableSwapOracle(address(pool), feed0, feed1);
     }
 
     function _newPool() internal returns (MockVeloPool pool) {
@@ -496,13 +501,5 @@ contract CappedVeloStableSwapOracleTest is Test {
     function _adapterAnswer(CappedVeloStableSwapPriceFeed adapter) internal view returns (uint256) {
         (, int256 answer,,,) = adapter.latestRoundData();
         return uint256(answer);
-    }
-
-    function _mockSequencerAnswer(int256 answer) internal {
-        vm.mockCall(
-            SEQUENCER_UPTIME_FEED,
-            abi.encodeWithSelector(IChainLinkOracle.latestRoundData.selector),
-            abi.encode(uint80(1), answer, block.timestamp, block.timestamp, uint80(1))
-        );
     }
 }

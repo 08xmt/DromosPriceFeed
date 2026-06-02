@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: AGLP-3.0
 pragma solidity ^0.8.20;
 
-import {Ownable2Step, Ownable} from "@openzeppelin/contracts@5.3.0/access/Ownable2Step.sol";
 import {IVeloPool} from "./interfaces/IVeloPool.sol";
 import {IChainLinkOracle} from "./interfaces/IChainLinkOracle.sol";
 import {FixedPointMathLib} from "./FixedPointMathLib.sol";
@@ -14,7 +13,7 @@ import {FixedPointMathLib} from "./FixedPointMathLib.sol";
  *  calculated, so upward moves above peg do not increase the reported LP value.
  */
 
-contract CappedVeloStableSwapOracle is Ownable2Step {
+contract CappedVeloStableSwapOracle {
     /* ========== STATE VARIABLES ========== */
     /// @notice Address of the pool for this oracle.
     address public immutable pool;
@@ -25,20 +24,15 @@ contract CappedVeloStableSwapOracle is Ownable2Step {
     /// @notice Address of the Chainlink price feed for token0.
     address public immutable token0Feed;
 
-    /// @notice Heartbeat of the Chainlink price feed for token0, exposed for downstream staleness checks.
-    uint96 public immutable token0Heartbeat;
-
     /// @notice Address of the pool's token1.
     address public immutable token1;
 
     /// @notice Address of the Chainlink price feed for token1.
     address public immutable token1Feed;
 
-    /// @notice Heartbeat of the Chainlink price feed for token1, exposed for downstream staleness checks.
-    uint96 public immutable token1Heartbeat;
-
     // our pool/LP token decimals, just in case velodrome has weird pools in the future with different decimals
     uint256 internal constant DECIMALS = 10 ** 18;
+    uint256 internal constant ORACLE_DECIMALS = 8;
     uint256 internal constant ONE_USD = 100_000_000;
 
     /* ========== CONSTRUCTOR ========== */
@@ -46,18 +40,8 @@ contract CappedVeloStableSwapOracle is Ownable2Step {
      * @param _pool Address of the Velodrome pool this oracle is pricing.
      * @param _token0Feed The Chainlink feed for token0.
      * @param _token1Feed The Chainlink feed for token1.
-     * @param _token0Heartbeat The heartbeat for the token0 feed.
-     * @param _token1Heartbeat The heartbeat for the token1 feed.
-     * @param _owner Owner role.
      */
-    constructor(
-        address _pool,
-        address _token0Feed,
-        address _token1Feed,
-        uint96 _token0Heartbeat,
-        uint96 _token1Heartbeat,
-        address _owner
-    ) Ownable(_owner) {
+    constructor(address _pool, address _token0Feed, address _token1Feed) {
         // set the pool in the constructor, pull token0 and token1 from that
         pool = _pool;
         IVeloPool poolContract = IVeloPool(_pool);
@@ -72,15 +56,16 @@ contract CappedVeloStableSwapOracle is Ownable2Step {
         token1 = _token1;
         token0Feed = _token0Feed;
         token1Feed = _token1Feed;
-        token0Heartbeat = _token0Heartbeat;
-        token1Heartbeat = _token1Heartbeat;
 
         if (_token0Feed == address(0) || _token1Feed == address(0)) {
             revert("Both tokens must have CL oracle");
         }
 
         // we always expect 8 decimals for USD pricing
-        if (IChainLinkOracle(_token0Feed).decimals() != 8 || IChainLinkOracle(_token1Feed).decimals() != 8) {
+        if (
+            IChainLinkOracle(_token0Feed).decimals() != ORACLE_DECIMALS
+                || IChainLinkOracle(_token1Feed).decimals() != ORACLE_DECIMALS
+        ) {
             revert("Must be 8 decimals");
         }
     }
@@ -161,7 +146,7 @@ contract CappedVeloStableSwapOracle is Ownable2Step {
         }
 
         fairReservesPricing =
-            _calculate_stable_lp_token_price(poolContract.totalSupply(), price0, price1, reserve0, reserve1, 8);
+            _calculate_stable_lp_token_price(poolContract.totalSupply(), price0, price1, reserve0, reserve1);
     }
 
     function _getTokenPricesData() internal view returns (uint256 price0, uint256 price1, uint256 updatedAt) {
@@ -181,9 +166,12 @@ contract CappedVeloStableSwapOracle is Ownable2Step {
         view
         returns (uint256 currentPrice, uint256 updatedAt)
     {
+        if (_tokenIndex > 1) {
+            revert("bad index");
+        }
+
         int256 price;
-        (, price, , updatedAt, ) =
-            IChainLinkOracle(_tokenIndex == 0 ? token0Feed : token1Feed).latestRoundData();
+        (, price,, updatedAt,) = IChainLinkOracle(_tokenIndex == 0 ? token0Feed : token1Feed).latestRoundData();
 
         if (price > 0) {
             // forge-lint: disable-next-line(unsafe-typecast)
@@ -198,13 +186,16 @@ contract CappedVeloStableSwapOracle is Ownable2Step {
         uint256 price0,
         uint256 price1,
         uint256 reserve0,
-        uint256 reserve1,
-        uint256 priceDecimals
+        uint256 reserve1
     ) internal pure returns (uint256) {
+        if (total_supply == 0) {
+            return 0;
+        }
+
         uint256 k = _getK(reserve0, reserve1);
         // fair_reserves = ( (k * (price0 ** 3) * (price1 ** 3)) )^(1/4) / ((price0 ** 2) + (price1 ** 2));
-        price0 *= 1e18 / (10 ** priceDecimals); // convert to 18 dec
-        price1 *= 1e18 / (10 ** priceDecimals);
+        price0 *= 1e18 / (10 ** ORACLE_DECIMALS); // convert to 18 dec
+        price1 *= 1e18 / (10 ** ORACLE_DECIMALS);
         uint256 a = FixedPointMathLib.rpow(price0, 3, 1e18); // keep same decimals as chainlink
         uint256 b = FixedPointMathLib.rpow(price1, 3, 1e18);
         uint256 c = FixedPointMathLib.rpow(price0, 2, 1e18);
@@ -217,7 +208,7 @@ contract CappedVeloStableSwapOracle is Ownable2Step {
         // each sqrt divides the num decimals by 2. So need to replenish the decimals midway through with another 1e18
         uint256 frth_fair = FixedPointMathLib.sqrt(FixedPointMathLib.sqrt(fair * 1e18) * 1e18); // number of decimals is 18
 
-        return 2 * ((frth_fair * (10 ** priceDecimals)) / total_supply); // converts to chainlink decimals
+        return 2 * ((frth_fair * (10 ** ORACLE_DECIMALS)) / total_supply); // converts to chainlink decimals
     }
 
     function _getK(uint256 x, uint256 y) internal pure returns (uint256) {
