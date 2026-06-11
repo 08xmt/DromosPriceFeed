@@ -3,6 +3,7 @@ pragma solidity ^0.8.19;
 
 import {IERC20} from "@openzeppelin/contracts@5.3.0/token/ERC20/IERC20.sol";
 
+//Compatible with aero/velodrome pools like https://basescan.org/address/0x8e9154ac849e839d60299e85156bcb589de2693a#code
 interface IVeloPool is IERC20 {
     function metadata()
         external

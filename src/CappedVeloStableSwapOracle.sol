@@ -9,6 +9,7 @@ import {FixedPointMathLib} from "./FixedPointMathLib.sol";
  * @title Capped Velodrome Stable Swap Oracle
  * @author Original author: Yearn Finance, Modified by: Inverse Finance
  * @notice This oracle may be used to price Velodrome-style stable LP pools using fair reserves.
+ * @dev DO NOT USE FOR BORROWABLE COLLATERAL AS IT's VULNERABLE TO DONATION ATTACKS
  *  Both pool tokens must have Chainlink USD feeds. Each token price is capped at 1 USD before the LP price is
  *  calculated, so upward moves above peg do not increase the reported LP value.
  */
