@@ -24,6 +24,47 @@ Foundry port and simplification of the Velodrome stable-swap LP oracle focused o
 
 Staleness and heartbeat checks are handled upstream. This contract forwards the older underlying feed timestamp via `getCurrentPoolPriceData()` and the price feed adapter.
 
+## Fair Price Derivation
+
+The oracle prices the LP token from the pool's fair reserves rather than from the current reserve ratio. Let:
+
+- `x` and `y` be the pool reserves normalized to 18 decimals;
+- `p0` and `p1` be the capped USD prices of token0 and token1;
+- `S` be total LP token supply;
+- `k = x^3 * y + y^3 * x` be the Velodrome stable-pool invariant.
+
+Fair reserves are the reserve amounts on the same invariant where both sides of the pool have equal USD value. If the common value of each side is `q`, then:
+
+```text
+p0 * x_fair = p1 * y_fair = q
+x_fair = q / p0
+y_fair = q / p1
+```
+
+Substitute those fair reserves into the invariant:
+
+```text
+k = x_fair^3 * y_fair + y_fair^3 * x_fair
+  = (q / p0)^3 * (q / p1) + (q / p1)^3 * (q / p0)
+  = q^4 / (p0^3 * p1) + q^4 / (p1^3 * p0)
+  = q^4 * (p0^2 + p1^2) / (p0^3 * p1^3)
+```
+
+Solving for `q` gives:
+
+```text
+q = ((k * p0^3 * p1^3) / (p0^2 + p1^2))^(1/4)
+```
+
+Because `q` is the fair USD value of one side of the pool, total fair pool value is `2q`. The fair LP token price is therefore:
+
+```text
+price = 2q / S
+      = 2 * ((k * p0^3 * p1^3) / (p0^2 + p1^2))^(1/4) / S
+```
+
+`CappedVeloStableSwapPriceFeed` does not recalculate this value. It forwards the oracle-computed LP price and the older of the two underlying feed update timestamps through a Chainlink-like `latestRoundData()` response.
+
 ## Price Feed Adapter
 
 `CappedVeloStableSwapPriceFeed` exposes `latestRoundData()` with 8 decimals. It forwards the oracle price and the older update timestamp from the two underlying feeds.
