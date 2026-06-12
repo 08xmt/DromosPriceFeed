@@ -14,7 +14,7 @@ import {FixedPointMathLib} from "./FixedPointMathLib.sol";
  *  calculated, so upward moves above peg do not increase the reported LP value.
  */
 
-contract CappedVeloStableSwapOracle {
+contract CappedVeloStableSwapOracle is IChainLinkOracle {
     /* ========== STATE VARIABLES ========== */
     /// @notice Address of the pool for this oracle.
     address public immutable pool;
@@ -33,7 +33,8 @@ contract CappedVeloStableSwapOracle {
 
     // our pool/LP token decimals, just in case velodrome has weird pools in the future with different decimals
     uint256 internal constant DECIMALS = 10 ** 18;
-    uint256 internal constant ORACLE_DECIMALS = 8;
+    uint8 internal constant ORACLE_DECIMALS = 8;
+    uint256 internal constant ORACLE_SCALE = 10 ** ORACLE_DECIMALS;
     uint256 internal constant ONE_USD = 100_000_000;
 
     /* ========== CONSTRUCTOR ========== */
@@ -72,6 +73,23 @@ contract CappedVeloStableSwapOracle {
     }
 
     /* ========== VIEW FUNCTIONS ========== */
+
+    function decimals() external pure override returns (uint8) {
+        return ORACLE_DECIMALS;
+    }
+
+    function latestRoundData()
+        external
+        view
+        override
+        returns (uint80 roundId, int256 answer, uint256 startedAt, uint256 updatedAt, uint80 answeredInRound)
+    {
+        uint256 price;
+        (price, updatedAt) = _getFairReservesPricingData(pool);
+        answer = _latestRoundAnswer(price);
+
+        return (0, answer, updatedAt, updatedAt, 0);
+    }
 
     /**
      * @notice Check the last time a token's Chainlink price was updated.
@@ -128,10 +146,7 @@ contract CappedVeloStableSwapOracle {
             uint256 decimals0, // note that this will be "1e18"", not "18"
             uint256 decimals1,
             uint256 reserve0,
-            uint256 reserve1,
-            ,
-            ,
-
+            uint256 reserve1,,,
         ) = poolContract.metadata();
 
         // make sure our reserves are normalized to 18 decimals (looking at you, USDC)
@@ -195,8 +210,8 @@ contract CappedVeloStableSwapOracle {
 
         uint256 k = _getK(reserve0, reserve1);
         // fair_reserves = ( (k * (price0 ** 3) * (price1 ** 3)) )^(1/4) / ((price0 ** 2) + (price1 ** 2));
-        price0 *= 1e18 / (10 ** ORACLE_DECIMALS); // convert to 18 dec
-        price1 *= 1e18 / (10 ** ORACLE_DECIMALS);
+        price0 *= 1e18 / ORACLE_SCALE; // convert to 18 dec
+        price1 *= 1e18 / ORACLE_SCALE;
         uint256 a = FixedPointMathLib.rpow(price0, 3, 1e18); // keep same decimals as chainlink
         uint256 b = FixedPointMathLib.rpow(price1, 3, 1e18);
         uint256 c = FixedPointMathLib.rpow(price0, 2, 1e18);
@@ -209,7 +224,7 @@ contract CappedVeloStableSwapOracle {
         // each sqrt divides the num decimals by 2. So need to replenish the decimals midway through with another 1e18
         uint256 frth_fair = FixedPointMathLib.sqrt(FixedPointMathLib.sqrt(fair * 1e18) * 1e18); // number of decimals is 18
 
-        return 2 * ((frth_fair * (10 ** ORACLE_DECIMALS)) / total_supply); // converts to chainlink decimals
+        return 2 * ((frth_fair * ORACLE_SCALE) / total_supply); // converts to chainlink decimals
     }
 
     function _getK(uint256 x, uint256 y) internal pure returns (uint256) {
@@ -220,6 +235,13 @@ contract CappedVeloStableSwapOracle {
         uint256 newY = FixedPointMathLib.mulWadDown(y_cubed, x);
 
         return newX + newY; // 18 decimals
+    }
+
+    function _latestRoundAnswer(uint256 price) internal pure returns (int256 answer) {
+        if (price <= uint256(type(int256).max)) {
+            // forge-lint: disable-next-line(unsafe-typecast)
+            answer = int256(price);
+        }
     }
 
     function _min(uint256 a, uint256 b) internal pure returns (uint256) {

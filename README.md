@@ -4,8 +4,7 @@ Foundry port and simplification of the Velodrome stable-swap LP oracle focused o
 
 ## Contracts
 
-- `src/CappedVeloStableSwapOracle.sol`: prices one Velodrome-style stable LP token from fair reserves.
-- `src/CappedVeloStableSwapPriceFeed.sol`: Chainlink-like adapter around the single oracle.
+- `src/CappedVeloStableSwapOracle.sol`: prices one Velodrome-style stable LP token from fair reserves and exposes a Chainlink-like price feed interface.
 - `src/MockChainlinkFeed.sol`: test-only Chainlink feed mock.
 
 ## Oracle Behavior
@@ -22,7 +21,7 @@ Foundry port and simplification of the Velodrome stable-swap LP oracle focused o
 - pool reserves are read from `IVeloPool.metadata()` and normalized to 18 decimals;
 - fair-reserve LP pricing uses the Velodrome stable invariant `x^3 * y + y^3 * x = k`.
 
-Staleness and heartbeat checks are handled upstream. This contract forwards the older underlying feed timestamp via `getCurrentPoolPriceData()` and the price feed adapter.
+Staleness and heartbeat checks are handled upstream. This contract forwards the older underlying feed timestamp via `getCurrentPoolPriceData()` and `latestRoundData()`.
 
 ## Fair Price Derivation
 
@@ -63,13 +62,13 @@ price = 2q / S
       = 2 * ((k * p0^3 * p1^3) / (p0^2 + p1^2))^(1/4) / S
 ```
 
-`CappedVeloStableSwapPriceFeed` does not recalculate this value. It forwards the oracle-computed LP price and the older of the two underlying feed update timestamps through a Chainlink-like `latestRoundData()` response.
+`CappedVeloStableSwapOracle` exposes this value through both oracle-specific getters and a Chainlink-like `latestRoundData()` response.
 
-## Price Feed Adapter
+## Price Feed Interface
 
-`CappedVeloStableSwapPriceFeed` exposes `latestRoundData()` with 8 decimals. It forwards the oracle price and the older update timestamp from the two underlying feeds.
+`CappedVeloStableSwapOracle` exposes `latestRoundData()` with 8 decimals. It returns the LP price and the older update timestamp from the two underlying feeds.
 
-If the source price is larger than `type(int256).max`, the adapter returns an answer of `0` rather than reverting.
+If the computed price is larger than `type(int256).max`, `latestRoundData()` returns an answer of `0` rather than reverting.
 
 ## Tests
 
@@ -78,7 +77,7 @@ The Forge tests are fully mocked and do not require an Optimism RPC URL. Coverag
 - constructor validation for stable pools, LP decimals, feed presence, and feed decimals;
 - token price capping at $1;
 - zero, negative, stale, reverting, and overflow feed behavior;
-- Chainlink-like adapter output;
+- Chainlink-like feed output;
 - fair-reserve pricing at parity;
 - reserve-edge stress tests, including invariant-preserving extreme pool skew and pathological one-sided reserve states.
 
