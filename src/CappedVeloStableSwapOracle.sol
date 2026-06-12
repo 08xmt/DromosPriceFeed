@@ -79,16 +79,23 @@ contract CappedVeloStableSwapOracle is IChainLinkOracle {
     }
 
     function latestRoundData()
-        external
+        public
         view
         override
         returns (uint80 roundId, int256 answer, uint256 startedAt, uint256 updatedAt, uint80 answeredInRound)
     {
         uint256 price;
-        (price, updatedAt) = _getFairReservesPricingData(pool);
-        answer = _latestRoundAnswer(price);
+        (price, updatedAt) = fairReservesPriceData();
+        if (price <= uint256(type(int256).max)) {
+            // forge-lint: disable-next-line(unsafe-typecast)
+            answer = int256(price);
+        }
 
         return (0, answer, updatedAt, updatedAt, 0);
+    }
+
+    function latestRoundAnswer() external view returns (int256 answer) {
+        (, answer,,,) = latestRoundData();
     }
 
     /**
@@ -99,23 +106,6 @@ contract CappedVeloStableSwapOracle is IChainLinkOracle {
      */
     function chainlinkPriceLastUpdated(uint256 _tokenIndex) external view returns (uint256 updatedAt) {
         (, updatedAt) = _getChainlinkPriceData(_tokenIndex);
-    }
-
-    /*
-     * @notice Gets the current price of a our Velodrome LP token.
-     * @return The current price of one LP token.
-     */
-    function getCurrentPoolPrice() public view returns (uint256 price) {
-        (price,) = _getFairReservesPricingData(pool);
-    }
-
-    /*
-     * @notice Gets the current price and oldest underlying feed update time for a Velodrome LP token.
-     * @return price The current price of one LP token, or 0 if an underlying answer is non-positive.
-     * @return updatedAt The older update timestamp from the two underlying feeds.
-     */
-    function getCurrentPoolPriceData() external view returns (uint256 price, uint256 updatedAt) {
-        return _getFairReservesPricingData(pool);
     }
 
     /**
@@ -135,13 +125,16 @@ contract CappedVeloStableSwapOracle is IChainLinkOracle {
 
     /* ========== HELPER VIEW FUNCTIONS ========== */
 
-    function _getFairReservesPricingData(address _pool)
-        internal
-        view
-        returns (uint256 fairReservesPricing, uint256 updatedAt)
-    {
+    /*
+     * @notice Gets the current fair-reserve price and oldest underlying feed update time for the configured
+     * Velodrome LP token.
+     * @return fairReservesPricing The current fair-reserve price of one LP token, or 0 if an underlying answer is
+     * non-positive.
+     * @return updatedAt The older update timestamp from the two underlying feeds.
+     */
+    function fairReservesPriceData() public view returns (uint256 fairReservesPricing, uint256 updatedAt) {
         // get what we need to calculate our reserves and pricing
-        IVeloPool poolContract = IVeloPool(_pool);
+        IVeloPool poolContract = IVeloPool(pool);
         (
             uint256 decimals0, // note that this will be "1e18"", not "18"
             uint256 decimals1,
@@ -154,8 +147,8 @@ contract CappedVeloStableSwapOracle is IChainLinkOracle {
         reserve1 = (reserve1 * DECIMALS) / decimals1;
 
         // pull our prices
-        (uint256 price0, uint256 price1, uint256 pricesUpdatedAt) = _getTokenPricesData();
-        updatedAt = pricesUpdatedAt;
+        (uint256 price0, uint256 price1, uint256 lastUpdatedAt) = _getTokenPricesData();
+        updatedAt = lastUpdatedAt;
 
         if (price0 == 0 || price1 == 0) {
             return (0, updatedAt);
@@ -235,13 +228,6 @@ contract CappedVeloStableSwapOracle is IChainLinkOracle {
         uint256 newY = FixedPointMathLib.mulWadDown(y_cubed, x);
 
         return newX + newY; // 18 decimals
-    }
-
-    function _latestRoundAnswer(uint256 price) internal pure returns (int256 answer) {
-        if (price <= uint256(type(int256).max)) {
-            // forge-lint: disable-next-line(unsafe-typecast)
-            answer = int256(price);
-        }
     }
 
     function _min(uint256 a, uint256 b) internal pure returns (uint256) {

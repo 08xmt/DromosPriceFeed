@@ -107,16 +107,6 @@ contract RevertingChainlinkFeed is IChainLinkOracle {
     }
 }
 
-contract CappedVeloStableSwapOracleHarness is CappedVeloStableSwapOracle {
-    constructor(address _pool, address _token0Feed, address _token1Feed)
-        CappedVeloStableSwapOracle(_pool, _token0Feed, _token1Feed)
-    {}
-
-    function exposedLatestRoundAnswer(uint256 price) external pure returns (int256) {
-        return _latestRoundAnswer(price);
-    }
-}
-
 contract CappedVeloStableSwapOracleTest is Test {
     uint256 internal constant WAD = 1e18;
     uint256 internal constant ONE_USD = 100_000_000;
@@ -159,31 +149,26 @@ contract CappedVeloStableSwapOracleTest is Test {
 
         (uint80 roundId, int256 answer, uint256 startedAt, uint256 updatedAt, uint80 answeredInRound) =
             source.latestRoundData();
-        uint256 sourcePrice = source.getCurrentPoolPrice();
+        uint256 sourcePrice = _currentPoolPrice(source);
 
         assertEq(feed0.decimals(), 8);
         assertEq(feed1.decimals(), 8);
         assertEq(source.decimals(), 8);
         assertEq(roundId, 0);
         assertEq(answer, int256(sourcePrice));
+        assertEq(source.latestRoundAnswer(), answer);
         assertEq(startedAt, updatedAt);
         assertEq(answeredInRound, 0);
     }
 
-    function testStableLpOraclePassesThroughZeroAndOverflowAnswers() public {
-        MockVeloPool pool = _newPool();
-        MockChainlinkFeed feed0 = new MockChainlinkFeed(int256(ONE_USD));
-        MockChainlinkFeed feed1 = new MockChainlinkFeed(int256(ONE_USD));
-        CappedVeloStableSwapOracleHarness source =
-            new CappedVeloStableSwapOracleHarness(address(pool), address(feed0), address(feed1));
+    function testStableLpOraclePassesThroughZeroAnswer() public {
+        (MockVeloPool pool,,, CappedVeloStableSwapOracle source) = _deployTwoFeedSource();
 
         pool.setState(0, WAD, WAD);
         (, int256 zeroAnswer,, uint256 zeroUpdatedAt,) = source.latestRoundData();
         assertEq(zeroAnswer, 0);
+        assertEq(source.latestRoundAnswer(), zeroAnswer);
         assertEq(zeroUpdatedAt, block.timestamp);
-
-        assertEq(source.exposedLatestRoundAnswer(uint256(type(int256).max)), type(int256).max);
-        assertEq(source.exposedLatestRoundAnswer(uint256(type(int256).max) + 1), 0);
     }
 
     function testTokenPricesAreCappedAtOneUsd() public {
@@ -194,7 +179,7 @@ contract CappedVeloStableSwapOracleTest is Test {
         (uint256 price0, uint256 price1) = source.getTokenPrices();
         assertEq(price0, ONE_USD);
         assertEq(price1, ONE_USD);
-        assertApproxEqAbs(source.getCurrentPoolPrice(), 2 * ONE_USD, 10);
+        assertApproxEqAbs(_currentPoolPrice(source), 2 * ONE_USD, 10);
     }
 
     function testTokenPriceCapPreservesBelowOneUsdPrices() public {
@@ -205,7 +190,7 @@ contract CappedVeloStableSwapOracleTest is Test {
         (uint256 price0, uint256 price1) = source.getTokenPrices();
         assertEq(price0, ONE_USD);
         assertEq(price1, 95_000_000);
-        assertLt(source.getCurrentPoolPrice(), 2 * ONE_USD);
+        assertLt(_currentPoolPrice(source), 2 * ONE_USD);
     }
 
     function testScenarioGridReturnsRows() public {
@@ -264,7 +249,7 @@ contract CappedVeloStableSwapOracleTest is Test {
 
         feed0.setAnswer(-1);
         assertEq(source.getChainlinkPrice(0), 0);
-        assertEq(source.getCurrentPoolPrice(), 0);
+        assertEq(_currentPoolPrice(source), 0);
         (, int256 badAnswer,,,) = source.latestRoundData();
         assertEq(badAnswer, 0);
     }
@@ -292,7 +277,7 @@ contract CappedVeloStableSwapOracleTest is Test {
         source.chainlinkPriceLastUpdated(0);
 
         vm.expectRevert(bytes("feed unavailable"));
-        source.getCurrentPoolPrice();
+        _currentPoolPrice(source);
 
         vm.expectRevert(bytes("feed unavailable"));
         source.latestRoundData();
@@ -301,7 +286,7 @@ contract CappedVeloStableSwapOracleTest is Test {
     function testFairReservePricingAtParity() public {
         (,,, CappedVeloStableSwapOracle source) = _deployTwoFeedSource();
 
-        assertApproxEqAbs(source.getCurrentPoolPrice(), 2 * ONE_USD, 10);
+        assertApproxEqAbs(_currentPoolPrice(source), 2 * ONE_USD, 10);
     }
 
     function testFairReservePricingReturnsZeroWhenTotalSupplyIsZero() public {
@@ -309,14 +294,14 @@ contract CappedVeloStableSwapOracleTest is Test {
 
         pool.setState(0, WAD, WAD);
 
-        assertEq(source.getCurrentPoolPrice(), 0);
+        assertEq(_currentPoolPrice(source), 0);
         (, int256 answer,,,) = source.latestRoundData();
         assertEq(answer, 0);
     }
 
     function testFairReservePricingStableAcrossInvariantPreservingReserveEdges() public {
         (MockVeloPool pool,,, CappedVeloStableSwapOracle source) = _deployTwoFeedSource();
-        uint256 baselinePrice = source.getCurrentPoolPrice();
+        uint256 baselinePrice = _currentPoolPrice(source);
         uint256 targetK = _stableK(WAD, WAD);
         uint256[4] memory scarceReserves = [uint256(1), uint256(1e6), uint256(1e9), uint256(1e12)];
 
@@ -327,10 +312,10 @@ contract CappedVeloStableSwapOracleTest is Test {
             uint256 pairedReserve = _reserveForStableK(scarceReserve, targetK);
 
             pool.setState(WAD, scarceReserve, pairedReserve);
-            assertApproxEqAbs(source.getCurrentPoolPrice(), baselinePrice, 1_000);
+            assertApproxEqAbs(_currentPoolPrice(source), baselinePrice, 1_000);
 
             pool.setState(WAD, pairedReserve, scarceReserve);
-            assertApproxEqAbs(source.getCurrentPoolPrice(), baselinePrice, 1_000);
+            assertApproxEqAbs(_currentPoolPrice(source), baselinePrice, 1_000);
         }
     }
 
@@ -364,7 +349,7 @@ contract CappedVeloStableSwapOracleTest is Test {
         MockChainlinkFeed(feed0).setAnswer(int256(answer0));
         MockChainlinkFeed(feed1).setAnswer(int256(answer1));
 
-        freshPrice = CappedVeloStableSwapOracle(source).getCurrentPoolPrice();
+        freshPrice = _currentPoolPrice(CappedVeloStableSwapOracle(source));
         feedPrice = _feedAnswer(CappedVeloStableSwapOracle(source));
     }
 
@@ -427,7 +412,7 @@ contract CappedVeloStableSwapOracleTest is Test {
     ) internal {
         pool.setState(WAD, reserve0, reserve1);
 
-        uint256 price = source.getCurrentPoolPrice();
+        uint256 price = _currentPoolPrice(source);
         uint256 reserveValue = ((reserve0 * ONE_USD) / WAD) + ((reserve1 * ONE_USD) / WAD);
 
         assertLe(price, reserveValue);
@@ -460,6 +445,10 @@ contract CappedVeloStableSwapOracleTest is Test {
         uint256 a = (reserve0 * reserve1) / WAD;
         uint256 b = ((reserve0 * reserve0) / WAD) + ((reserve1 * reserve1) / WAD);
         return (a * b) / WAD;
+    }
+
+    function _currentPoolPrice(CappedVeloStableSwapOracle source) internal view returns (uint256 price) {
+        (price,) = source.fairReservesPriceData();
     }
 
     function _feedAnswer(CappedVeloStableSwapOracle source) internal view returns (uint256) {

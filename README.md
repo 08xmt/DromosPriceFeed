@@ -21,7 +21,7 @@ Foundry port and simplification of the Velodrome stable-swap LP oracle focused o
 - pool reserves are read from `IVeloPool.metadata()` and normalized to 18 decimals;
 - fair-reserve LP pricing uses the Velodrome stable invariant `x^3 * y + y^3 * x = k`.
 
-Staleness and heartbeat checks are handled upstream. This contract forwards the older underlying feed timestamp via `getCurrentPoolPriceData()` and `latestRoundData()`.
+Staleness and heartbeat checks are handled upstream. This contract forwards the older underlying feed timestamp via `fairReservesPriceData()` and `latestRoundData()`.
 
 ## Fair Price Derivation
 
@@ -66,7 +66,7 @@ price = 2q / S
 
 ## Price Feed Interface
 
-`CappedVeloStableSwapOracle` exposes `latestRoundData()` with 8 decimals. It returns the LP price and the older update timestamp from the two underlying feeds.
+`CappedVeloStableSwapOracle` exposes `latestRoundData()` with 8 decimals. It returns the LP price and the older update timestamp from the two underlying feeds. `latestRoundAnswer()` returns the `latestRoundData()` answer directly.
 
 If the computed price is larger than `type(int256).max`, `latestRoundData()` returns an answer of `0` rather than reverting.
 
