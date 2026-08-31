@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGLP-3.0
 pragma solidity ^0.8.20;
 
+import {IERC20Metadata} from "@openzeppelin/contracts@5.3.0/token/ERC20/extensions/IERC20Metadata.sol";
 import {IVeloPool} from "./interfaces/IVeloPool.sol";
 import {IChainLinkOracle} from "./interfaces/IChainLinkOracle.sol";
 import {FixedPointMathLib} from "./FixedPointMathLib.sol";
@@ -12,6 +13,23 @@ import {FixedPointMathLib} from "./FixedPointMathLib.sol";
  * @dev DO NOT USE FOR BORROWABLE COLLATERAL AS IT's VULNERABLE TO DONATION ATTACKS
  *  Both pool tokens must have Chainlink USD feeds. Each token price is capped at 1 USD before the LP price is
  *  calculated, so upward moves above peg do not increase the reported LP value.
+ *
+ *  metadata() is decoded positionally, so the constructor pins the tuple to the shape this oracle expects:
+ *  both decoded token slots must hold contracts, and dec0/dec1 must equal 10 ** token.decimals(). A pool
+ *  with a different metadata() layout, or one reporting raw decimal counts, is rejected at deployment
+ *  rather than silently mispricing the LP.
+ *
+ *  DEPLOYMENT REQUIREMENT: neither pool token may hand execution to an attacker or arbitrary third party
+ *  during transfer or transferFrom. No ERC-777/ERC-1363-style hooks, no callback on receipt, no transfer
+ *  logic that calls an address the caller controls. This is a hard requirement, not a preference, and it
+ *  cannot be enforced on-chain here - the deployer must verify it for both tokens before deployment.
+ *
+ *  Why: this oracle reads the pool's stored reserves and its live totalSupply as a coupled pair with no
+ *  atomicity guard. A Velodrome-style burn() reduces totalSupply, then transfers both tokens out, then
+ *  updates reserves. A token that calls back during those transfers lets an attacker read this oracle
+ *  mid-burn, with totalSupply already reduced and reserves still pre-burn, inflating the reported LP price
+ *  by totalSupply_before / totalSupply_after. That ratio is unbounded: burning 90% of supply reports a 10x
+ *  price. metadata() is an unguarded view, so the pool's own reentrancy lock does not close this window.
  */
 
 contract CappedVeloStableSwapOracle is IChainLinkOracle {
@@ -36,6 +54,7 @@ contract CappedVeloStableSwapOracle is IChainLinkOracle {
     uint8 internal constant ORACLE_DECIMALS = 8;
     uint256 internal constant ORACLE_SCALE = 10 ** ORACLE_DECIMALS;
     uint256 internal constant ONE_USD = 100_000_000;
+    bytes32 internal constant STABLE_POOL_TYPE = "V2_STABLE";
 
     /* ========== CONSTRUCTOR ========== */
     /**
@@ -50,10 +69,26 @@ contract CappedVeloStableSwapOracle is IChainLinkOracle {
         if (poolContract.decimals() != 18) {
             revert("Lp token must have 18 decimals");
         }
-        (,,,, bool isStable, address _token0, address _token1) = poolContract.metadata();
-        if (!isStable) {
+        if (poolContract.POOL_TYPE() != STABLE_POOL_TYPE) {
             revert("Pool must be stable");
         }
+        (uint256 _decimals0, uint256 _decimals1,,, address _token0, address _token1) = poolContract.metadata();
+
+        // metadata() is decoded positionally, so a pool whose tuple layout differs from IVeloPool
+        // would decode silently into the wrong fields. Both token slots must hold real contracts.
+        if (_token0.code.length == 0 || _token1.code.length == 0) {
+            revert("Bad metadata layout");
+        }
+
+        // The reserve normalization in fairReservesPriceData() divides by these scalars, and the
+        // price is linear in the result. They must be 10 ** token.decimals(), not the raw count.
+        if (
+            _decimals0 != 10 ** uint256(IERC20Metadata(_token0).decimals())
+                || _decimals1 != 10 ** uint256(IERC20Metadata(_token1).decimals())
+        ) {
+            revert("Bad metadata decimals");
+        }
+
         token0 = _token0;
         token1 = _token1;
         token0Feed = _token0Feed;
@@ -131,6 +166,10 @@ contract CappedVeloStableSwapOracle is IChainLinkOracle {
      * @return fairReservesPricing The current fair-reserve price of one LP token, or 0 if an underlying answer is
      * non-positive.
      * @return updatedAt The older update timestamp from the two underlying feeds.
+     * @dev The stored reserves read here and the live totalSupply read below are a coupled pair, and this
+     * function does not guard their atomicity. Correctness depends on the deployment requirement in the
+     * contract NatSpec: neither pool token may hand execution to a third party during transfer. Without
+     * that, a mid-burn read sees a reduced totalSupply against pre-burn reserves and overprices the LP.
      */
     function fairReservesPriceData() public view returns (uint256 fairReservesPricing, uint256 updatedAt) {
         // get what we need to calculate our reserves and pricing
@@ -139,7 +178,7 @@ contract CappedVeloStableSwapOracle is IChainLinkOracle {
             uint256 decimals0, // note that this will be "1e18"", not "18"
             uint256 decimals1,
             uint256 reserve0,
-            uint256 reserve1,,,
+            uint256 reserve1,,
         ) = poolContract.metadata();
 
         // make sure our reserves are normalized to 18 decimals (looking at you, USDC)

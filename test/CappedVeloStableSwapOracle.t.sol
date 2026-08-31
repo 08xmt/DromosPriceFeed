@@ -15,9 +15,12 @@ contract MockToken {
 }
 
 contract MockVeloPool {
+    bytes32 internal constant STABLE_POOL_TYPE = "V2_STABLE";
+    bytes32 internal constant VOLATILE_POOL_TYPE = "V2_VOLATILE";
+
     address public immutable token0;
     address public immutable token1;
-    bool public immutable stable;
+    bytes32 public immutable POOL_TYPE;
 
     uint8 internal lpDecimals = 18;
     uint256 public totalSupply;
@@ -29,7 +32,7 @@ contract MockVeloPool {
     constructor(address _token0, address _token1, bool _stable) {
         token0 = _token0;
         token1 = _token1;
-        stable = _stable;
+        POOL_TYPE = _stable ? STABLE_POOL_TYPE : VOLATILE_POOL_TYPE;
         decimals0 = 1e18;
         decimals1 = 1e18;
         totalSupply = 1e18;
@@ -55,13 +58,38 @@ contract MockVeloPool {
     function metadata()
         external
         view
-        returns (uint256 dec0, uint256 dec1, uint256 r0, uint256 r1, bool st, address t0, address t1)
+        returns (uint256 dec0, uint256 dec1, uint256 r0, uint256 r1, address t0, address t1)
     {
-        return (decimals0, decimals1, reserve0, reserve1, stable, token0, token1);
+        return (decimals0, decimals1, reserve0, reserve1, token0, token1);
     }
 
     function decimals() external view returns (uint8) {
         return lpDecimals;
+    }
+}
+
+/// @dev Velodrome/Aerodrome V2 metadata() shape: seven fields, with `bool stable` at index 4.
+/// Decoded against the six-field IVeloPool signature this silently yields token0 = address(1).
+contract SevenFieldVeloPool {
+    address public immutable token0;
+    address public immutable token1;
+    bytes32 public constant POOL_TYPE = "V2_STABLE";
+
+    uint256 public totalSupply = 1e18;
+    uint256 internal reserve0 = 1e18;
+    uint256 internal reserve1 = 1e18;
+
+    constructor(address _token0, address _token1) {
+        token0 = _token0;
+        token1 = _token1;
+    }
+
+    function metadata() external view returns (uint256, uint256, uint256, uint256, bool, address, address) {
+        return (1e18, 1e18, reserve0, reserve1, true, token0, token1);
+    }
+
+    function decimals() external pure returns (uint8) {
+        return 18;
     }
 }
 
@@ -234,6 +262,50 @@ contract CappedVeloStableSwapOracleTest is Test {
         _deploySource(pool, address(badDecimalsFeed), address(feed));
     }
 
+    function testConstructorRejectsRawDecimalCountsInMetadata() public {
+        // dec0/dec1 as the raw decimal count instead of 10 ** decimals. Left unchecked this
+        // inflates the normalized reserves, and the LP price with them, by 1e6 / 6 = 166,666x.
+        MockVeloPool pool = _newPoolWithTokenDecimals(6, 6, 6);
+        MockChainlinkFeed feed0 = new MockChainlinkFeed(int256(ONE_USD));
+        MockChainlinkFeed feed1 = new MockChainlinkFeed(int256(ONE_USD));
+
+        vm.expectRevert(bytes("Bad metadata decimals"));
+        _deploySource(pool, address(feed0), address(feed1));
+    }
+
+    function testConstructorRejectsHalfMismatchedMetadataDecimals() public {
+        MockVeloPool pool = _newPoolWithTokenDecimals(6, 1e6, 6);
+        MockChainlinkFeed feed0 = new MockChainlinkFeed(int256(ONE_USD));
+        MockChainlinkFeed feed1 = new MockChainlinkFeed(int256(ONE_USD));
+
+        vm.expectRevert(bytes("Bad metadata decimals"));
+        _deploySource(pool, address(feed0), address(feed1));
+    }
+
+    function testConstructorRejectsSevenFieldMetadataLayout() public {
+        MockToken token0 = new MockToken(18);
+        MockToken token1 = new MockToken(18);
+        SevenFieldVeloPool pool = new SevenFieldVeloPool(address(token0), address(token1));
+        MockChainlinkFeed feed0 = new MockChainlinkFeed(int256(ONE_USD));
+        MockChainlinkFeed feed1 = new MockChainlinkFeed(int256(ONE_USD));
+
+        // The `bool stable` word decodes as address(1), which holds no code.
+        vm.expectRevert(bytes("Bad metadata layout"));
+        new CappedVeloStableSwapOracle(address(pool), address(feed0), address(feed1));
+    }
+
+    function testFairReservePricingWithSixDecimalTokens() public {
+        // The normalization branch at fairReservesPriceData() is only exercised when dec0 != 1e18.
+        MockVeloPool pool = _newPoolWithTokenDecimals(6, 1e6, 1e6);
+        MockChainlinkFeed feed0 = new MockChainlinkFeed(int256(ONE_USD));
+        MockChainlinkFeed feed1 = new MockChainlinkFeed(int256(ONE_USD));
+        CappedVeloStableSwapOracle source = _deploySource(pool, address(feed0), address(feed1));
+
+        pool.setState(50_000e18, 50_000e6, 50_000e6);
+
+        assertApproxEqAbs(_currentPoolPrice(source), 2 * ONE_USD, 10);
+    }
+
     function testChainlinkPricePassesThroughStaleAndBadData() public {
         MockVeloPool pool = _newPool();
         FlexibleChainlinkFeed feed0 = new FlexibleChainlinkFeed(8, int256(ONE_USD));
@@ -393,6 +465,16 @@ contract CappedVeloStableSwapOracleTest is Test {
         MockToken token0 = new MockToken(18);
         MockToken token1 = new MockToken(18);
         pool = new MockVeloPool(address(token0), address(token1), stable);
+    }
+
+    function _newPoolWithTokenDecimals(uint8 tokenDecimals, uint256 metadataDecimals0, uint256 metadataDecimals1)
+        internal
+        returns (MockVeloPool pool)
+    {
+        MockToken token0 = new MockToken(tokenDecimals);
+        MockToken token1 = new MockToken(tokenDecimals);
+        pool = new MockVeloPool(address(token0), address(token1), true);
+        pool.setTokenDecimals(metadataDecimals0, metadataDecimals1);
     }
 
     function _setBoth(MockChainlinkFeed feed0, MockChainlinkFeed feed1, uint256 answer) internal {

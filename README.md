@@ -1,6 +1,6 @@
 # Capped Velodrome Stable Swap Oracle
 
-Foundry port and simplification of the Velodrome stable-swap LP oracle focused on capped USD pricing from two Chainlink feeds.
+Foundry port and simplification of the Velodrome stable-swap LP oracle focused on capped USD pricing from two Chainlink feeds. The pool integration targets Dromos V3 stable pools.
 
 ## Contracts
 
@@ -11,14 +11,18 @@ Foundry port and simplification of the Velodrome stable-swap LP oracle focused o
 
 `CappedVeloStableSwapOracle` is intentionally narrow:
 
-- only stable pools are supported;
+- only Dromos V3 pools whose `POOL_TYPE` is `V2_STABLE` are supported;
 - the LP token must have 18 decimals;
 - both underlying tokens must have Chainlink feeds;
 - both Chainlink feeds must report 8-decimal USD prices;
 - each underlying token price is capped at `1e8` before LP pricing, so prices above $1 do not increase the reported LP value;
 - non-positive underlying feed answers produce an LP price of `0`;
 - zero LP token supply produces an LP price of `0`;
-- pool reserves are read from `IVeloPool.metadata()` and normalized to 18 decimals;
+- pool reserves are read from the Dromos V3 six-field `IVeloPool.metadata()` and normalized to 18 decimals;
+- `metadata()` is decoded positionally, so the constructor pins its shape: both decoded token slots must hold
+  contracts, and `dec0`/`dec1` must equal `10 ** token.decimals()`. A pool with a different `metadata()` layout
+  (for example the seven-field Velodrome/Aerodrome V2 tuple) or one reporting raw decimal counts is rejected at
+  deployment instead of silently mispricing the LP;
 - fair-reserve LP pricing uses the Velodrome stable invariant `x^3 * y + y^3 * x = k`.
 
 Staleness and heartbeat checks are handled upstream. This contract forwards the older underlying feed timestamp via `fairReservesPriceData()` and `latestRoundData()`.
@@ -74,7 +78,9 @@ If the computed price is larger than `type(int256).max`, `latestRoundData()` ret
 
 The Forge tests are fully mocked and do not require an Optimism RPC URL. Coverage includes:
 
-- constructor validation for stable pools, LP decimals, feed presence, and feed decimals;
+- constructor validation for the `V2_STABLE` pool type, LP decimals, feed presence, feed decimals, the
+  `metadata()` tuple layout, and the `metadata()` decimal scalars;
+- fair-reserve pricing for 6-decimal underlying tokens, exercising the reserve normalization branch;
 - token price capping at $1;
 - zero, negative, stale, reverting, and overflow feed behavior;
 - Chainlink-like feed output;
