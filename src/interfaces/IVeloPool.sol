@@ -1,9 +1,9 @@
-// SPDX-License-Identifier: AGLP-3.0
+// SPDX-License-Identifier: AGPL-3.0-only
 pragma solidity ^0.8.19;
 
 import {IERC20} from "@openzeppelin/contracts@5.3.0/token/ERC20/IERC20.sol";
 
-// Compatible with Dromos V3 constant-product pools.
+// Compatible with Dromos V3 V2_STABLE pools.
 interface IVeloPool is IERC20 {
     function metadata()
         external

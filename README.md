@@ -2,6 +2,9 @@
 
 Foundry port and simplification of the Velodrome stable-swap LP oracle focused on capped USD pricing from two Chainlink feeds. The pool integration targets Dromos V3 stable pools.
 
+> [!WARNING]
+> Do not use this oracle for borrowable collateral. Donation attacks can manipulate the reported LP value.
+
 ## Contracts
 
 - `src/CappedVeloStableSwapOracle.sol`: prices one Velodrome-style stable LP token from fair reserves and exposes a Chainlink-like price feed interface.
@@ -71,6 +74,8 @@ price = 2q / S
 ## Price Feed Interface
 
 `CappedVeloStableSwapOracle` exposes `latestRoundData()` with 8 decimals. It returns the LP price and the older update timestamp from the two underlying feeds. `latestRoundAnswer()` returns the `latestRoundData()` answer directly.
+
+`roundId` and `answeredInRound` are always `0` and carry no information. Consumers must not use them to detect price updates or freshness; use `updatedAt`, which is the older underlying feed timestamp.
 
 If the computed price is larger than `type(int256).max`, `latestRoundData()` returns an answer of `0` rather than reverting.
 

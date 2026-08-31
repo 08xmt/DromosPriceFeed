@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGLP-3.0
+// SPDX-License-Identifier: AGPL-3.0-only
 pragma solidity ^0.8.20;
 
 import {IERC20Metadata} from "@openzeppelin/contracts@5.3.0/token/ERC20/extensions/IERC20Metadata.sol";
@@ -10,7 +10,7 @@ import {FixedPointMathLib} from "./FixedPointMathLib.sol";
  * @title Capped Velodrome Stable Swap Oracle
  * @author Original author: Yearn Finance, Modified by: Inverse Finance
  * @notice This oracle may be used to price Velodrome-style stable LP pools using fair reserves.
- * @dev DO NOT USE FOR BORROWABLE COLLATERAL AS IT's VULNERABLE TO DONATION ATTACKS
+ * @dev DO NOT USE FOR BORROWABLE COLLATERAL AS ITS VALUE IS VULNERABLE TO DONATION ATTACKS
  *  Both pool tokens must have Chainlink USD feeds. Each token price is capped at 1 USD before the LP price is
  *  calculated, so upward moves above peg do not increase the reported LP value.
  *
@@ -113,6 +113,16 @@ contract CappedVeloStableSwapOracle is IChainLinkOracle {
         return ORACLE_DECIMALS;
     }
 
+    /**
+     * @notice Returns the current LP price and the older underlying feed update timestamp.
+     * @dev `roundId` and `answeredInRound` are always 0 and carry no information. Consumers must use
+     * `updatedAt`, not round identity, to detect price updates and evaluate freshness.
+     * @return roundId Always 0; carries no information.
+     * @return answer The current LP price with 8 decimals.
+     * @return startedAt The same timestamp as `updatedAt`.
+     * @return updatedAt The older update timestamp from the two underlying feeds.
+     * @return answeredInRound Always 0; carries no information.
+     */
     function latestRoundData()
         public
         view
