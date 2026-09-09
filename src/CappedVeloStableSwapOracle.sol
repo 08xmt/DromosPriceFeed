@@ -5,11 +5,12 @@ import {IERC20Metadata} from "@openzeppelin/contracts@5.3.0/token/ERC20/extensio
 import {IVeloPool} from "./interfaces/IVeloPool.sol";
 import {IChainLinkOracle} from "./interfaces/IChainLinkOracle.sol";
 import {FixedPointMathLib} from "./FixedPointMathLib.sol";
+import {Math} from "@openzeppelin/contracts@5.3.0/utils/math/Math.sol";
 
 /**
  * @title Capped Velodrome Stable Swap Oracle
  * @author Original author: Yearn Finance, Modified by: Inverse Finance
- * @notice This oracle may be used to price Velodrome-style stable LP pools using fair reserves.
+ * @notice Prices Velodrome-style stable LP pools at fee-free arbitrage equilibrium using capped USD prices.
  * @dev DO NOT USE FOR BORROWABLE COLLATERAL AS ITS VALUE IS VULNERABLE TO DONATION ATTACKS
  *  Both pool tokens must have Chainlink USD feeds. Each token price is capped at 1 USD before the LP price is
  *  calculated, so upward moves above peg do not increase the reported LP value.
@@ -52,7 +53,6 @@ contract CappedVeloStableSwapOracle is IChainLinkOracle {
     // our pool/LP token decimals, just in case velodrome has weird pools in the future with different decimals
     uint256 internal constant DECIMALS = 10 ** 18;
     uint8 internal constant ORACLE_DECIMALS = 8;
-    uint256 internal constant ORACLE_SCALE = 10 ** ORACLE_DECIMALS;
     uint256 internal constant ONE_USD = 100_000_000;
     bytes32 internal constant STABLE_POOL_TYPE = "V2_STABLE";
 
@@ -174,7 +174,7 @@ contract CappedVeloStableSwapOracle is IChainLinkOracle {
      * @notice Gets the current fair-reserve price and oldest underlying feed update time for the configured
      * Velodrome LP token.
      * @return fairReservesPricing The current fair-reserve price of one LP token, or 0 if an underlying answer is
-     * non-positive.
+     * non-positive. Empty pools and values below the arithmetic/output resolution also return 0.
      * @return updatedAt The older update timestamp from the two underlying feeds.
      * @dev The stored reserves read here and the live totalSupply read below are a coupled pair, and this
      * function does not guard their atomicity. Correctness depends on the deployment requirement in the
@@ -237,8 +237,10 @@ contract CappedVeloStableSwapOracle is IChainLinkOracle {
         }
     }
 
-    // solves for cases where curve is x^3 * y + y^3 * x = k
-    // fair reserves math formula author: @ksyao2002
+    // Fee-free arbitrage-equilibrium value for x^3*y + x*y^3 = k.
+    // Let a = p0+p1, z = cbrt(abs(p0-p1)/a), and c = 1-z^4.
+    // The minimum pool value is (k/2)^(1/4) * a * c^(3/4).
+    // Prices enter with 8 decimals; reserves and supply enter with 18.
     function _calculate_stable_lp_token_price(
         uint256 total_supply,
         uint256 price0,
@@ -246,37 +248,54 @@ contract CappedVeloStableSwapOracle is IChainLinkOracle {
         uint256 reserve0,
         uint256 reserve1
     ) internal pure returns (uint256) {
-        if (total_supply == 0) {
+        if (total_supply == 0 || price0 == 0 || price1 == 0) {
             return 0;
         }
 
         uint256 k = _getK(reserve0, reserve1);
-        // fair_reserves = ( (k * (price0 ** 3) * (price1 ** 3)) )^(1/4) / ((price0 ** 2) + (price1 ** 2));
-        price0 *= 1e18 / ORACLE_SCALE; // convert to 18 dec
-        price1 *= 1e18 / ORACLE_SCALE;
-        uint256 a = FixedPointMathLib.rpow(price0, 3, 1e18); // keep same decimals as chainlink
-        uint256 b = FixedPointMathLib.rpow(price1, 3, 1e18);
-        uint256 c = FixedPointMathLib.rpow(price0, 2, 1e18);
-        uint256 d = FixedPointMathLib.rpow(price1, 2, 1e18);
+        // Halving first deliberately rounds odd k down and reduces the intermediate product.
+        // forge-lint: disable-next-line(divide-before-multiply)
+        uint256 balancedReserve = FixedPointMathLib.sqrt(FixedPointMathLib.sqrt((k / 2) * 1e18) * 1e18);
+        uint256 priceSum = price0 + price1;
+        if (price0 == price1) {
+            return Math.mulDiv(balancedReserve, priceSum, total_supply);
+        }
 
-        uint256 p0 = k * FixedPointMathLib.mulWadDown(a, b); // 2*18 decimals
+        uint256 difference = price0 > price1 ? price0 - price1 : price1 - price0;
+        // Feed prices are capped at 1e8, so difference*1e54 fits uint256.
+        // Round z upward so c, and hence the quoted value, round downward.
+        uint256 z = _cbrtUp(Math.ceilDiv(difference * 1e54, priceSum));
+        uint256 zSquared = Math.mulDiv(z, z, 1e18, Math.Rounding.Ceil);
+        uint256 zFourth = Math.mulDiv(zSquared, zSquared, 1e18, Math.Rounding.Ceil);
+        uint256 c = 1e18 - zFourth;
 
-        uint256 fair = p0 / (c + d); // number of decimals is 18
+        // Take the fourth root before cubing to retain precision at small c.
+        uint256 fourthRoot = FixedPointMathLib.sqrt(FixedPointMathLib.sqrt(c * 1e18) * 1e18);
+        uint256 factor = Math.mulDiv(Math.mulDiv(fourthRoot, fourthRoot, 1e18), fourthRoot, 1e18);
+        uint256 adjustedReserve = Math.mulDiv(balancedReserve, factor, 1e18);
+        return Math.mulDiv(adjustedReserve, priceSum, total_supply);
+    }
 
-        // each sqrt divides the num decimals by 2. So need to replenish the decimals midway through with another 1e18
-        uint256 frth_fair = FixedPointMathLib.sqrt(FixedPointMathLib.sqrt(fair * 1e18) * 1e18); // number of decimals is 18
-
-        return 2 * ((frth_fair * ORACLE_SCALE) / total_supply); // converts to chainlink decimals
+    // Ceiling integer cube root. The sole production caller supplies n <= 1e54.
+    function _cbrtUp(uint256 n) internal pure returns (uint256 z) {
+        if (n == 0) return 0;
+        // A power-of-two upper bound on cbrt(n); n <= 1e54 makes the shift at most 60.
+        // forge-lint: disable-next-line(incorrect-shift)
+        z = 1 << ((Math.log2(n) + 3) / 3);
+        while (true) {
+            uint256 next = (2 * z + n / (z * z)) / 3;
+            if (next >= z) break;
+            z = next;
+        }
+        if (z * z * z < n) ++z;
     }
 
     function _getK(uint256 x, uint256 y) internal pure returns (uint256) {
-        //x, n, scalar
-        uint256 x_cubed = FixedPointMathLib.rpow(x, 3, 1e18);
-        uint256 newX = FixedPointMathLib.mulWadDown(x_cubed, y);
-        uint256 y_cubed = FixedPointMathLib.rpow(y, 3, 1e18);
-        uint256 newY = FixedPointMathLib.mulWadDown(y_cubed, x);
-
-        return newX + newY; // 18 decimals
+        // Match the stable pool's order of operations and floor rounding.
+        // K must also round downward for the final value to be a lower bound.
+        uint256 a = Math.mulDiv(x, y, 1e18);
+        uint256 b = Math.mulDiv(x, x, 1e18) + Math.mulDiv(y, y, 1e18);
+        return Math.mulDiv(a, b, 1e18);
     }
 
     function _min(uint256 a, uint256 b) internal pure returns (uint256) {
