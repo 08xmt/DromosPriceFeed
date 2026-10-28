@@ -4,15 +4,17 @@ pragma solidity ^0.8.20;
 import {IERC20Metadata} from "@openzeppelin/contracts@5.3.0/token/ERC20/extensions/IERC20Metadata.sol";
 import {IVeloPool} from "./interfaces/IVeloPool.sol";
 import {IChainLinkOracle} from "./interfaces/IChainLinkOracle.sol";
-import {FixedPointMathLib} from "./FixedPointMathLib.sol";
+import {FixedPointMathLib} from "solady/utils/FixedPointMathLib.sol";
 
 /**
  * @title Capped Velodrome Stable Swap Oracle
- * @author Original author: Yearn Finance, Modified by: Inverse Finance
- * @notice This oracle may be used to price Velodrome-style stable LP pools using fair reserves.
+ * @author Inverse Finance
+ * @notice Prices Velodrome-style stable LP pools at their fee-free arbitrage equilibrium value.
  * @dev DO NOT USE FOR BORROWABLE COLLATERAL AS ITS VALUE IS VULNERABLE TO DONATION ATTACKS
  *  Both pool tokens must have Chainlink USD feeds. Each token price is capped at 1 USD before the LP price is
  *  calculated, so upward moves above peg do not increase the reported LP value.
+ *  If either underlying price is below minTokenPriceBps of the $1 peg, the effective
+ *  timestamp is zero while the LP price is still calculated. A threshold of zero disables this signal.
  *
  *  metadata() is decoded positionally, so the constructor pins the tuple to the shape this oracle expects:
  *  both decoded token slots must hold contracts, and dec0/dec1 must equal 10 ** token.decimals(). A pool
@@ -49,6 +51,9 @@ contract CappedVeloStableSwapOracle is IChainLinkOracle {
     /// @notice Address of the Chainlink price feed for token1.
     address public immutable token1Feed;
 
+    /// @notice Minimum underlying price in basis points of $1; 9500 means $0.95, 0 disables the signal.
+    uint256 public immutable minTokenPriceBps;
+
     // our pool/LP token decimals, just in case velodrome has weird pools in the future with different decimals
     uint256 internal constant DECIMALS = 10 ** 18;
     uint8 internal constant ORACLE_DECIMALS = 8;
@@ -61,8 +66,11 @@ contract CappedVeloStableSwapOracle is IChainLinkOracle {
      * @param _pool Address of the Velodrome pool this oracle is pricing.
      * @param _token0Feed The Chainlink feed for token0.
      * @param _token1Feed The Chainlink feed for token1.
+     * @param _minTokenPriceBps Minimum underlying price in basis points of $1 (0 disables, maximum 10000).
      */
-    constructor(address _pool, address _token0Feed, address _token1Feed) {
+    constructor(address _pool, address _token0Feed, address _token1Feed, uint256 _minTokenPriceBps) {
+        if (_minTokenPriceBps > 10_000) revert("Threshold exceeds 10000 bps");
+        minTokenPriceBps = _minTokenPriceBps;
         // set the pool in the constructor, pull token0 and token1 from that
         pool = _pool;
         IVeloPool poolContract = IVeloPool(_pool);
@@ -80,7 +88,7 @@ contract CappedVeloStableSwapOracle is IChainLinkOracle {
             revert("Bad metadata layout");
         }
 
-        // The reserve normalization in fairReservesPriceData() divides by these scalars, and the
+        // The reserve normalization in _getLpPriceData() divides by these scalars, and the
         // price is linear in the result. They must be 10 ** token.decimals(), not the raw count.
         if (
             _decimals0 != 10 ** uint256(IERC20Metadata(_token0).decimals())
@@ -114,13 +122,13 @@ contract CappedVeloStableSwapOracle is IChainLinkOracle {
     }
 
     /**
-     * @notice Returns the current LP price and the older underlying feed update timestamp.
+     * @notice Returns the current LP price and its effective update timestamp.
      * @dev `roundId` and `answeredInRound` are always 0 and carry no information. Consumers must use
      * `updatedAt`, not round identity, to detect price updates and evaluate freshness.
      * @return roundId Always 0; carries no information.
-     * @return answer The current LP price with 8 decimals.
+     * @return answer The current LP price with 8 decimals, capped at type(int256).max.
      * @return startedAt The same timestamp as `updatedAt`.
-     * @return updatedAt The older update timestamp from the two underlying feeds.
+     * @return updatedAt Zero if either price is below the enabled threshold; otherwise the older feed timestamp.
      * @return answeredInRound Always 0; carries no information.
      */
     function latestRoundData()
@@ -130,10 +138,12 @@ contract CappedVeloStableSwapOracle is IChainLinkOracle {
         returns (uint80 roundId, int256 answer, uint256 startedAt, uint256 updatedAt, uint80 answeredInRound)
     {
         uint256 price;
-        (price, updatedAt) = fairReservesPriceData();
+        (price, updatedAt) = _getLpPriceData();
         if (price <= uint256(type(int256).max)) {
             // forge-lint: disable-next-line(unsafe-typecast)
             answer = int256(price);
+        } else {
+            answer = type(int256).max;
         }
 
         return (0, answer, updatedAt, updatedAt, 0);
@@ -144,44 +154,39 @@ contract CappedVeloStableSwapOracle is IChainLinkOracle {
     }
 
     /**
-     * @notice Check the last time a token's Chainlink price was updated.
-     * @dev Useful for external checks if a price is stale.
-     * @param _tokenIndex The index of the token to get the price of (0 or 1).
-     * @return updatedAt The timestamp of our last price update.
+     * @notice Returns both capped token prices and their effective update timestamp.
+     * @return price0 Token0 USD price capped at $1, with 8 decimals; 0 for a non-positive answer.
+     * @return price1 Token1 USD price capped at $1, with 8 decimals; 0 for a non-positive answer.
+     * @return updatedAt Zero on a threshold breach; otherwise the older underlying timestamp.
      */
-    function chainlinkPriceLastUpdated(uint256 _tokenIndex) external view returns (uint256 updatedAt) {
-        (, updatedAt) = _getChainlinkPriceData(_tokenIndex);
-    }
+    function getTokenPrices() public view returns (uint256 price0, uint256 price1, uint256 updatedAt) {
+        uint256 updatedAt0;
+        uint256 updatedAt1;
 
-    /**
-     * @notice Returns the Chainlink feed price of the given token address.
-     * @dev Returns 0 if the feed answer is non-positive. Staleness is not enforced here.
-     * @param _tokenIndex The index of the token to get the price of (0 or 1).
-     * @return currentPrice The current price of the underlying token.
-     */
-    function getChainlinkPrice(uint256 _tokenIndex) public view returns (uint256 currentPrice) {
-        (currentPrice,) = _getChainlinkPriceData(_tokenIndex);
-    }
+        (price0, updatedAt0) = _getChainlinkPriceData(token0Feed);
+        (price1, updatedAt1) = _getChainlinkPriceData(token1Feed);
 
-    /// @notice Returns token Chainlink prices capped at 1 USD, with 8 decimals.
-    function getTokenPrices() public view returns (uint256 price0, uint256 price1) {
-        (price0, price1,) = _getTokenPricesData();
+        // One basis point of the $1 peg is exactly 10_000 units of an 8-decimal feed.
+        // When disabled, thresholdPrice is zero and even normalized non-positive answers do not trip it.
+        uint256 thresholdPrice = minTokenPriceBps * ONE_USD / 10_000;
+        updatedAt =
+            price0 < thresholdPrice || price1 < thresholdPrice ? 0 : FixedPointMathLib.min(updatedAt0, updatedAt1);
+        price0 = FixedPointMathLib.min(price0, ONE_USD);
+        price1 = FixedPointMathLib.min(price1, ONE_USD);
     }
 
     /* ========== HELPER VIEW FUNCTIONS ========== */
 
-    /*
-     * @notice Gets the current fair-reserve price and oldest underlying feed update time for the configured
-     * Velodrome LP token.
-     * @return fairReservesPricing The current fair-reserve price of one LP token, or 0 if an underlying answer is
-     * non-positive.
-     * @return updatedAt The older update timestamp from the two underlying feeds.
+    /**
+     * @notice Gets the current arbitrage LP price and effective update timestamp.
+     * @return price The current LP price, or 0 if an underlying answer is non-positive.
+     * @return updatedAt Zero on a threshold breach; otherwise the older underlying timestamp.
      * @dev The stored reserves read here and the live totalSupply read below are a coupled pair, and this
      * function does not guard their atomicity. Correctness depends on the deployment requirement in the
      * contract NatSpec: neither pool token may hand execution to a third party during transfer. Without
      * that, a mid-burn read sees a reduced totalSupply against pre-burn reserves and overprices the LP.
      */
-    function fairReservesPriceData() public view returns (uint256 fairReservesPricing, uint256 updatedAt) {
+    function _getLpPriceData() internal view returns (uint256 price, uint256 updatedAt) {
         // get what we need to calculate our reserves and pricing
         IVeloPool poolContract = IVeloPool(pool);
         (
@@ -192,44 +197,27 @@ contract CappedVeloStableSwapOracle is IChainLinkOracle {
         ) = poolContract.metadata();
 
         // make sure our reserves are normalized to 18 decimals (looking at you, USDC)
-        reserve0 = (reserve0 * DECIMALS) / decimals0;
-        reserve1 = (reserve1 * DECIMALS) / decimals1;
+        reserve0 = FixedPointMathLib.fullMulDiv(reserve0, DECIMALS, decimals0);
+        reserve1 = FixedPointMathLib.fullMulDiv(reserve1, DECIMALS, decimals1);
 
         // pull our prices
-        (uint256 price0, uint256 price1, uint256 lastUpdatedAt) = _getTokenPricesData();
+        (uint256 price0, uint256 price1, uint256 lastUpdatedAt) = getTokenPrices();
         updatedAt = lastUpdatedAt;
 
         if (price0 == 0 || price1 == 0) {
             return (0, updatedAt);
         }
 
-        fairReservesPricing =
-            _calculate_stable_lp_token_price(poolContract.totalSupply(), price0, price1, reserve0, reserve1);
+        price = _calculate_stable_lp_token_price(poolContract.totalSupply(), price0, price1, reserve0, reserve1);
     }
 
-    function _getTokenPricesData() internal view returns (uint256 price0, uint256 price1, uint256 updatedAt) {
-        uint256 updatedAt0;
-        uint256 updatedAt1;
-
-        (price0, updatedAt0) = _getChainlinkPriceData(0);
-        (price1, updatedAt1) = _getChainlinkPriceData(1);
-
-        price0 = _min(price0, ONE_USD);
-        price1 = _min(price1, ONE_USD);
-        updatedAt = _min(updatedAt0, updatedAt1);
-    }
-
-    function _getChainlinkPriceData(uint256 _tokenIndex)
-        internal
-        view
-        returns (uint256 currentPrice, uint256 updatedAt)
-    {
-        if (_tokenIndex > 1) {
-            revert("bad index");
+    function _getChainlinkPriceData(address _feed) internal view returns (uint256 currentPrice, uint256 updatedAt) {
+        if (_feed != token0Feed && _feed != token1Feed) {
+            revert("bad feed");
         }
 
         int256 price;
-        (, price,, updatedAt,) = IChainLinkOracle(_tokenIndex == 0 ? token0Feed : token1Feed).latestRoundData();
+        (, price,, updatedAt,) = IChainLinkOracle(_feed).latestRoundData();
 
         if (price > 0) {
             // forge-lint: disable-next-line(unsafe-typecast)
@@ -237,8 +225,10 @@ contract CappedVeloStableSwapOracle is IChainLinkOracle {
         }
     }
 
-    // solves for cases where curve is x^3 * y + y^3 * x = k
-    // fair reserves math formula author: @ksyao2002
+    /// @dev Minimum of p0*x+p1*y on x^3*y+x*y^3=k, divided by supply.
+    /// With u=x+y and v=abs(x-y), k=(u^4-v^4)/8. At the minimum,
+    /// z=v/u=cbrt(abs(p0-p1)/(p0+p1)), giving value=(k/2)^0.25*(p0+p1)*(1-z^4)^0.75.
+    /// Prices remain in feed units. Roots and products round toward a lower valuation.
     function _calculate_stable_lp_token_price(
         uint256 total_supply,
         uint256 price0,
@@ -246,40 +236,37 @@ contract CappedVeloStableSwapOracle is IChainLinkOracle {
         uint256 reserve0,
         uint256 reserve1
     ) internal pure returns (uint256) {
-        if (total_supply == 0) {
+        if (total_supply == 0 || price0 == 0 || price1 == 0) {
             return 0;
         }
 
-        uint256 k = _getK(reserve0, reserve1);
-        // fair_reserves = ( (k * (price0 ** 3) * (price1 ** 3)) )^(1/4) / ((price0 ** 2) + (price1 ** 2));
-        price0 *= 1e18 / ORACLE_SCALE; // convert to 18 dec
-        price1 *= 1e18 / ORACLE_SCALE;
-        uint256 a = FixedPointMathLib.rpow(price0, 3, 1e18); // keep same decimals as chainlink
-        uint256 b = FixedPointMathLib.rpow(price1, 3, 1e18);
-        uint256 c = FixedPointMathLib.rpow(price0, 2, 1e18);
-        uint256 d = FixedPointMathLib.rpow(price1, 2, 1e18);
+        // Pool invariant xy(x^2+y^2), with each division rounded down.
+        uint256 xy = FixedPointMathLib.fullMulDiv(reserve0, reserve1, DECIMALS);
+        uint256 squares = FixedPointMathLib.fullMulDiv(reserve0, reserve0, DECIMALS)
+            + FixedPointMathLib.fullMulDiv(reserve1, reserve1, DECIMALS);
+        uint256 k = FixedPointMathLib.fullMulDiv(xy, squares, DECIMALS);
+        if (k == 0) return 0;
 
-        uint256 p0 = k * FixedPointMathLib.mulWadDown(a, b); // 2*18 decimals
+        uint256 sum = price0 + price1;
+        uint256 difference = price0 > price1 ? price0 - price1 : price1 - price0;
+        uint256 shape = DECIMALS;
+        if (difference != 0) {
+            // Floor the fully scaled ratio, then round its cube root upward exactly.
+            // Capped feed prices keep the target and cube comparison within uint256.
+            uint256 target = difference * 1e54;
+            uint256 z = FixedPointMathLib.cbrt(target / sum);
+            if (z * z * z * sum < target) ++z;
+            // z is an upper bound; ceil(z^4 / 1e54) preserves a lower bound on 1-z^4.
+            uint256 m = DECIMALS - FixedPointMathLib.divUp((z * z) * (z * z), 1e54);
+            // Keep the full 72-decimal radicand instead of flooring m^3 onto a wad grid.
+            shape = FixedPointMathLib.sqrt(FixedPointMathLib.sqrt(m * m * m * DECIMALS));
+        }
 
-        uint256 fair = p0 / (c + d); // number of decimals is 18
-
-        // each sqrt divides the num decimals by 2. So need to replenish the decimals midway through with another 1e18
-        uint256 frth_fair = FixedPointMathLib.sqrt(FixedPointMathLib.sqrt(fair * 1e18) * 1e18); // number of decimals is 18
-
-        return 2 * ((frth_fair * ORACLE_SCALE) / total_supply); // converts to chainlink decimals
-    }
-
-    function _getK(uint256 x, uint256 y) internal pure returns (uint256) {
-        //x, n, scalar
-        uint256 x_cubed = FixedPointMathLib.rpow(x, 3, 1e18);
-        uint256 newX = FixedPointMathLib.mulWadDown(x_cubed, y);
-        uint256 y_cubed = FixedPointMathLib.rpow(y, 3, 1e18);
-        uint256 newY = FixedPointMathLib.mulWadDown(y_cubed, x);
-
-        return newX + newY; // 18 decimals
-    }
-
-    function _min(uint256 a, uint256 b) internal pure returns (uint256) {
-        return a < b ? a : b;
+        // mulSqrt handles the 512-bit product. Two floor square roots give
+        // floor((k * 5e53)^(1/4)) without discarding fractional reserve precision.
+        uint256 reserveScale = FixedPointMathLib.sqrt(FixedPointMathLib.mulSqrt(k, 5e53));
+        // Keep shape's fractional reserve precision through the supply division.
+        // reserveScale < 2^109, shape <= 1e18 and sum <= 2e8, so this product fits.
+        return FixedPointMathLib.fullMulDiv(reserveScale * shape, sum, total_supply) / DECIMALS;
     }
 }
