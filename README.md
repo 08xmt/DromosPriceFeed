@@ -81,18 +81,20 @@ donations that increase k or the token-callback read window described in the con
 
 The contract keeps prices in their original 8-decimal units. It computes k with the pool-style operation
 order `floor(floor(x*y/1e18) * (floor(x*x/1e18)+floor(y*y/1e18)) / 1e18)`.
-Full-precision `mulDiv` avoids intermediate-product overflow when the quotient fits.
+Full-precision `fullMulDiv` avoids intermediate-product overflow when the quotient fits.
 
-The cube-root helper encloses z in an interval and returns its upper bound, at 18 decimals, in at most
-60 bisection iterations. Rounding z upward and z^4 upward makes `1-z^4` a lower bound. Its three-quarter
-power is computed by two downward integer square roots on the full 72-decimal radicand. No tiny cubed
-price product is rounded in isolation.
+Roots use Solady's vendored `FixedPointMathLib`. The valuation computes the floor root of the
+fully scaled integer ratio with `cbrt`, then compares its cube against the original ratio to round z
+upward exactly, at 18 decimals. Rounding z upward and z^4 upward makes `1-z^4` a lower bound. Its
+three-quarter power is computed by two downward integer square roots on the full 72-decimal radicand.
+No tiny cubed price product is rounded in isolation.
 
-The reserve-scale helper returns `floor((k_integer * 5e53)^(1/4))`, which is the 18-decimal representation
-of `(k_real/2)^(1/4)`. The radicand uses both words of a 512-bit product, and exact fourth-power comparisons
-bound the search to 109 iterations. Fractional reserve precision is retained through the supply division;
-the final conversion to feed units also rounds down. These operations produce a lower bound on the
-analytical arbitrage value, with additional conservatism from invariant and reserve-normalization rounding.
+The reserve scale is `floor((k_integer * 5e53)^(1/4))`, which is the 18-decimal representation
+of `(k_real/2)^(1/4)`. It uses `sqrt(mulSqrt(k_integer, 5e53))`: `mulSqrt` handles the 512-bit product,
+and two floor square roots give the exact floor fourth root. Fractional reserve precision is retained
+through the supply division; the final conversion to feed units also rounds down. These operations produce
+a lower bound on the analytical arbitrage value, with additional conservatism from invariant and
+reserve-normalization rounding.
 
 All positive capped feed answers from `1` ($0.00000001) to `1e8` ($1) are supported. Former price-dependent
 zero cliffs are removed: when both feeds report `1`, a balanced pool with reserves equal to supply reports

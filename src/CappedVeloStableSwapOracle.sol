@@ -2,10 +2,9 @@
 pragma solidity ^0.8.20;
 
 import {IERC20Metadata} from "@openzeppelin/contracts@5.3.0/token/ERC20/extensions/IERC20Metadata.sol";
-import {Math} from "@openzeppelin/contracts@5.3.0/utils/math/Math.sol";
 import {IVeloPool} from "./interfaces/IVeloPool.sol";
 import {IChainLinkOracle} from "./interfaces/IChainLinkOracle.sol";
-import {FixedPointMathLib} from "./FixedPointMathLib.sol";
+import {FixedPointMathLib} from "solady/utils/FixedPointMathLib.sol";
 
 /**
  * @title Capped Velodrome Stable Swap Oracle
@@ -170,9 +169,10 @@ contract CappedVeloStableSwapOracle is IChainLinkOracle {
         // One basis point of the $1 peg is exactly 10_000 units of an 8-decimal feed.
         // When disabled, thresholdPrice is zero and even normalized non-positive answers do not trip it.
         uint256 thresholdPrice = minTokenPriceBps * ONE_USD / 10_000;
-        updatedAt = price0 < thresholdPrice || price1 < thresholdPrice ? 0 : _min(updatedAt0, updatedAt1);
-        price0 = _min(price0, ONE_USD);
-        price1 = _min(price1, ONE_USD);
+        updatedAt =
+            price0 < thresholdPrice || price1 < thresholdPrice ? 0 : FixedPointMathLib.min(updatedAt0, updatedAt1);
+        price0 = FixedPointMathLib.min(price0, ONE_USD);
+        price1 = FixedPointMathLib.min(price1, ONE_USD);
     }
 
     /* ========== HELPER VIEW FUNCTIONS ========== */
@@ -197,8 +197,8 @@ contract CappedVeloStableSwapOracle is IChainLinkOracle {
         ) = poolContract.metadata();
 
         // make sure our reserves are normalized to 18 decimals (looking at you, USDC)
-        reserve0 = Math.mulDiv(reserve0, DECIMALS, decimals0);
-        reserve1 = Math.mulDiv(reserve1, DECIMALS, decimals1);
+        reserve0 = FixedPointMathLib.fullMulDiv(reserve0, DECIMALS, decimals0);
+        reserve1 = FixedPointMathLib.fullMulDiv(reserve1, DECIMALS, decimals1);
 
         // pull our prices
         (uint256 price0, uint256 price1, uint256 lastUpdatedAt) = getTokenPrices();
@@ -240,75 +240,33 @@ contract CappedVeloStableSwapOracle is IChainLinkOracle {
             return 0;
         }
 
-        uint256 k = _getK(reserve0, reserve1);
+        // Pool invariant xy(x^2+y^2), with each division rounded down.
+        uint256 xy = FixedPointMathLib.fullMulDiv(reserve0, reserve1, DECIMALS);
+        uint256 squares = FixedPointMathLib.fullMulDiv(reserve0, reserve0, DECIMALS)
+            + FixedPointMathLib.fullMulDiv(reserve1, reserve1, DECIMALS);
+        uint256 k = FixedPointMathLib.fullMulDiv(xy, squares, DECIMALS);
         if (k == 0) return 0;
 
         uint256 sum = price0 + price1;
         uint256 difference = price0 > price1 ? price0 - price1 : price1 - price0;
         uint256 shape = DECIMALS;
         if (difference != 0) {
-            uint256 z = _cubeRootRatioUp(difference, sum);
+            // Floor the fully scaled ratio, then round its cube root upward exactly.
+            // Capped feed prices keep the target and cube comparison within uint256.
+            uint256 target = difference * 1e54;
+            uint256 z = FixedPointMathLib.cbrt(target / sum);
+            if (z * z * z * sum < target) ++z;
             // z is an upper bound; ceil(z^4 / 1e54) preserves a lower bound on 1-z^4.
-            uint256 m = DECIMALS - Math.ceilDiv((z * z) * (z * z), 1e54);
+            uint256 m = DECIMALS - FixedPointMathLib.divUp((z * z) * (z * z), 1e54);
             // Keep the full 72-decimal radicand instead of flooring m^3 onto a wad grid.
             shape = FixedPointMathLib.sqrt(FixedPointMathLib.sqrt(m * m * m * DECIMALS));
         }
 
-        uint256 reserveScale = _fourthRootK(k);
+        // mulSqrt handles the 512-bit product. Two floor square roots give
+        // floor((k * 5e53)^(1/4)) without discarding fractional reserve precision.
+        uint256 reserveScale = FixedPointMathLib.sqrt(FixedPointMathLib.mulSqrt(k, 5e53));
         // Keep shape's fractional reserve precision through the supply division.
         // reserveScale < 2^109, shape <= 1e18 and sum <= 2e8, so this product fits.
-        return Math.mulDiv(reserveScale * shape, sum, total_supply) / DECIMALS;
-    }
-
-    /// @dev ceil(1e18 * cbrt(numerator/denominator)). Inputs are capped feed prices:
-    /// 0 < numerator < denominator <= 2e8, so every cube comparison fits uint256.
-    /// The enclosing interval halves each step, requiring at most 60 iterations.
-    function _cubeRootRatioUp(uint256 numerator, uint256 denominator) internal pure returns (uint256) {
-        if (numerator == 0) return 0;
-        uint256 low;
-        uint256 high = DECIMALS;
-        uint256 target = numerator * 1e54;
-        while (high - low > 1) {
-            uint256 mid = (low + high) / 2;
-            if (mid * mid * mid * denominator < target) {
-                low = mid;
-            } else {
-                high = mid;
-            }
-        }
-        return high;
-    }
-
-    /// @dev floor(1e18 * (k_real/2)^0.25), where k=k_real*1e18.
-    /// The radicand k*5e53 may exceed uint256; compare fourth powers in 512 bits.
-    /// Its root is strictly below 2^109 for every uint256 k. At most 109 iterations;
-    /// mid^2 fits uint256, and Math.mul512 supplies both words of mid^4.
-    function _fourthRootK(uint256 k) internal pure returns (uint256) {
-        if (k == 0) return 0;
-        (uint256 targetHigh, uint256 targetLow) = Math.mul512(k, 5e53);
-        uint256 low;
-        uint256 high = uint256(1) << 109;
-        while (high - low > 1) {
-            uint256 mid = (low + high) / 2;
-            uint256 squared = mid * mid;
-            (uint256 powerHigh, uint256 powerLow) = Math.mul512(squared, squared);
-            if (powerHigh < targetHigh || (powerHigh == targetHigh && powerLow <= targetLow)) {
-                low = mid;
-            } else {
-                high = mid;
-            }
-        }
-        return low;
-    }
-
-    /// @dev Same order as the pool invariant xy(x^2+y^2), with every division floored.
-    function _getK(uint256 x, uint256 y) internal pure returns (uint256) {
-        uint256 a = Math.mulDiv(x, y, DECIMALS);
-        uint256 b = Math.mulDiv(x, x, DECIMALS) + Math.mulDiv(y, y, DECIMALS);
-        return Math.mulDiv(a, b, DECIMALS);
-    }
-
-    function _min(uint256 a, uint256 b) internal pure returns (uint256) {
-        return a < b ? a : b;
+        return FixedPointMathLib.fullMulDiv(reserveScale * shape, sum, total_supply) / DECIMALS;
     }
 }
